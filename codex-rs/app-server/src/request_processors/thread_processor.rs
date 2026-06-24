@@ -1133,6 +1133,15 @@ impl ThreadRequestProcessor {
             .sum();
         let mut thread_extension_init = ExtensionDataInit::new();
         if !selected_capability_roots.is_empty() {
+            // Selection is frozen at thread start; feature and auth gating happen when it is used.
+            let connector_provider =
+                codex_connectors_extension::SelectedExecutorConnectorProvider::new(
+                    listener_task_context.thread_manager.environment_manager(),
+                );
+            let connector_snapshot = connector_provider
+                .snapshot_for_roots(&selected_capability_roots)
+                .await;
+            thread_extension_init.insert(connector_snapshot);
             thread_extension_init.insert(selected_capability_roots);
             codex_mcp_extension::initialize_executor_plugin_thread_data(&mut thread_extension_init);
         }
