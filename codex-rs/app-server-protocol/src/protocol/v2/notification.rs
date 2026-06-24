@@ -18,6 +18,16 @@ pub struct DeprecationNoticeNotification {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct MonitorEventNotification {
+    /// Short description of the monitor that produced this event.
+    pub description: String,
+    /// The event line emitted by the monitored command.
+    pub line: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct WarningNotification {
     /// Optional thread target when the warning applies to a specific thread.
     pub thread_id: Option<String>,
