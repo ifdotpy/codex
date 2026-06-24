@@ -21,6 +21,7 @@ use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::CommandExecutionSource;
 use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::DeprecationNoticeNotification;
+use codex_app_server_protocol::MonitorEventNotification;
 use codex_app_server_protocol::DynamicToolCallParams;
 use codex_app_server_protocol::DynamicToolCallStatus;
 use codex_app_server_protocol::ErrorNotification;
@@ -931,6 +932,15 @@ pub(crate) async fn apply_bespoke_event_handling(
             };
             outgoing
                 .send_server_notification(ServerNotification::DeprecationNotice(notification))
+                .await;
+        }
+        EventMsg::MonitorEvent(event) => {
+            let notification = MonitorEventNotification {
+                description: event.description,
+                line: event.line,
+            };
+            outgoing
+                .send_server_notification(ServerNotification::MonitorEvent(notification))
                 .await;
         }
         EventMsg::TokenCount(token_count_event) => {

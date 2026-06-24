@@ -184,6 +184,37 @@ impl HistoryCell for DeprecationNoticeCell {
         lines
     }
 }
+#[derive(Debug)]
+pub(crate) struct MonitorEventCell {
+    description: String,
+    line: String,
+}
+
+pub(crate) fn new_monitor_event(description: String, line: String) -> MonitorEventCell {
+    MonitorEventCell { description, line }
+}
+
+impl HistoryCell for MonitorEventCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        // Distinct system-notice styling: a 📡 badge + cyan label so a monitor
+        // event reads as neither user nor agent speech.
+        let label = format!("📡 monitor[{}] ", self.description);
+        lines.push(vec![label.cyan().bold()].into());
+
+        let wrap_width = width.saturating_sub(4).max(1) as usize;
+        let body = Line::from(self.line.clone());
+        let wrapped = adaptive_wrap_line(&body, RtOptions::new(wrap_width));
+        push_owned_lines(&wrapped, &mut lines);
+
+        lines
+    }
+
+    fn raw_lines(&self) -> Vec<Line<'static>> {
+        vec![Line::from(format!("monitor[{}] {}", self.description, self.line))]
+    }
+}
+
 pub(crate) fn new_info_event(message: String, hint: Option<String>) -> PlainHistoryCell {
     let mut line = vec!["• ".dim(), message.into()];
     if let Some(hint) = hint {
