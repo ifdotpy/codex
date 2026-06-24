@@ -8,7 +8,10 @@ use serde::Serialize;
 use serde::Serializer;
 use serde::de::Error as _;
 
+/// Correlates a client operation with its host response.
 pub type RequestId = u64;
+
+/// Correlates a host-initiated delegate call with its client response.
 pub type DelegateRequestId = u64;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
