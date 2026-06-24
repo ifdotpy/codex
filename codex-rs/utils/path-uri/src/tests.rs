@@ -360,6 +360,30 @@ fn file_uri_round_trips_windows_unc_paths() {
 }
 
 #[test]
+#[cfg(windows)]
+fn windows_path_buf_preserves_native_prefixes() {
+    let localhost = AbsolutePathBuf::from_absolute_path_checked(r"\\localhost\C$\Users\alice\repo")
+        .expect("absolute localhost UNC path");
+    let localhost_uri = PathUri::from_abs_path(&localhost);
+    assert_eq!(
+        localhost_uri.to_windows_path_buf().expect("UNC path"),
+        localhost.to_path_buf()
+    );
+
+    let extended = PathBuf::from(r"\\?\C:\long\workspace");
+    let extended_uri = PathUri::from_absolute_native_path(
+        extended.to_str().expect("Unicode path"),
+        PathConvention::Windows,
+    )
+    .expect("extended Windows path");
+    assert!(extended_uri.to_abs_path().is_ok());
+    assert_eq!(
+        extended_uri.to_windows_path_buf().expect("extended path"),
+        extended
+    );
+}
+
+#[test]
 fn file_uri_retains_unc_authority() {
     let uri = PathUri::parse("file://server/share/src/main.rs").expect("valid file URI");
 

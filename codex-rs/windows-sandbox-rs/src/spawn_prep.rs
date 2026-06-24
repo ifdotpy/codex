@@ -21,11 +21,13 @@ use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
 use crate::sandbox_utils::ensure_codex_home_exists;
 use crate::sandbox_utils::inject_git_safe_directory;
 use crate::setup::effective_write_roots_for_permissions;
+use crate::setup::gather_read_roots;
 use crate::token::LocalSid;
 use crate::token::create_readonly_token_with_cap;
 use crate::token::create_workspace_write_token_with_caps_from;
 use crate::token::get_current_token_for_restriction;
 use crate::token::get_logon_sid_bytes;
+use crate::winutil::resolve_windows_executable;
 use crate::workspace_acl::is_command_cwd_root;
 use crate::workspace_acl::protect_workspace_agents_dir;
 use crate::workspace_acl::protect_workspace_codex_dir;
@@ -52,6 +54,8 @@ pub(crate) struct ElevatedSpawnContext {
     pub(crate) logs_base_dir: Option<PathBuf>,
     pub(crate) sandbox_creds: SandboxCreds,
     pub(crate) cap_sids: Vec<String>,
+    pub(crate) application_path: PathBuf,
+    pub(crate) read_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,6 +75,24 @@ pub(crate) struct RootCapabilitySid {
     pub(crate) root: PathBuf,
     pub(crate) sid: LocalSid,
     pub(crate) sid_str: String,
+}
+
+pub(crate) fn read_roots_with_resolved_executable(
+    permissions: &ResolvedWindowsSandboxPermissions,
+    cwd: &Path,
+    env_map: &HashMap<String, String>,
+    codex_home: &Path,
+    command: &[String],
+    read_roots_override: Option<&[PathBuf]>,
+) -> Result<(PathBuf, Vec<PathBuf>)> {
+    let program = command
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("cannot start an empty Windows command"))?;
+    let executable = resolve_windows_executable(program, cwd, env_map)?;
+    let read_roots = read_roots_override
+        .map(<[PathBuf]>::to_vec)
+        .unwrap_or_else(|| gather_read_roots(cwd, permissions, env_map, codex_home));
+    Ok((executable, read_roots))
 }
 
 pub(crate) struct LegacyAclSids<'a> {
@@ -361,8 +383,16 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
 ) -> Result<ElevatedSpawnContext> {
     normalize_null_device_env(env_map);
     ensure_non_interactive_pager(env_map);
-    inherit_path_env(env_map);
     inject_git_safe_directory(env_map, cwd);
+
+    let (application_path, read_roots) = read_roots_with_resolved_executable(
+        &permissions,
+        cwd,
+        env_map,
+        codex_home,
+        command,
+        read_roots_override,
+    )?;
 
     // Use a temp-based log dir that the sandbox user can write.
     let sandbox_base = codex_home.join(".sandbox");
@@ -403,7 +433,8 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
         cwd,
         env_map,
         codex_home,
-        read_roots_override,
+        Some(&read_roots),
+        Some(application_path.as_path()),
         read_roots_include_platform_defaults,
         setup_write_roots_override,
         deny_read_paths_override,
@@ -441,6 +472,8 @@ pub(crate) fn prepare_elevated_spawn_context_for_permissions(
         logs_base_dir,
         sandbox_creds,
         cap_sids,
+        application_path,
+        read_roots,
     })
 }
 

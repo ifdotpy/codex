@@ -81,6 +81,12 @@ const NETWORK_ACCESS_DENIED_MESSAGE: &str =
 const LATE_NETWORK_DENIAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 const INTERRUPT: &str = "\u{3}";
 
+#[cfg(target_os = "windows")]
+fn native_windows_path(path: &PathUri) -> Result<std::path::PathBuf, UnifiedExecError> {
+    path.to_windows_path_buf()
+        .map_err(|_| UnifiedExecError::ForeignPath { path: path.clone() })
+}
+
 /// Test-only override for deterministic unified exec process IDs.
 ///
 /// In production builds this value should remain at its default (`false`) and
@@ -955,14 +961,7 @@ impl UnifiedExecProcessManager {
 
         #[cfg(target_os = "windows")]
         if request.sandbox == codex_sandboxing::SandboxType::WindowsRestrictedToken {
-            // TODO(anp): Keep PathUri through the Windows sandbox launch boundary.
-            let native_cwd =
-                request
-                    .cwd
-                    .to_abs_path()
-                    .map_err(|_| UnifiedExecError::ForeignPath {
-                        path: request.cwd.clone(),
-                    })?;
+            let native_cwd = native_windows_path(&request.cwd)?;
             let codex_home = crate::config::find_codex_home().map_err(|err| {
                 UnifiedExecError::create_process(format!(
                     "windows sandbox: failed to resolve codex_home: {err}"
@@ -1055,7 +1054,9 @@ impl UnifiedExecProcessManager {
             return UnifiedExecProcess::from_exec_server_started(started).await;
         }
 
-        // TODO(anp): Keep PathUri through the local PTY/process launch boundary.
+        #[cfg(target_os = "windows")]
+        let native_cwd = native_windows_path(&request.cwd)?;
+        #[cfg(not(target_os = "windows"))]
         let native_cwd = request
             .cwd
             .to_abs_path()
@@ -1067,6 +1068,23 @@ impl UnifiedExecProcessManager {
             .command
             .split_first()
             .ok_or(UnifiedExecError::MissingCommandLine)?;
+        #[cfg(target_os = "windows")]
+        let resolved_program = codex_windows_sandbox::resolve_windows_executable(
+            program,
+            native_cwd.as_path(),
+            &request.env,
+        )
+        .map_err(|err| UnifiedExecError::create_process(err.to_string()))?
+        .into_os_string()
+        .into_string()
+        .map_err(|program| {
+            UnifiedExecError::create_process(format!(
+                "resolved Windows executable is not valid Unicode: {}",
+                program.to_string_lossy()
+            ))
+        })?;
+        #[cfg(target_os = "windows")]
+        let program = resolved_program.as_str();
         let spawn_result = if tty {
             codex_utils_pty::pty::spawn_process_with_inherited_fds(
                 program,

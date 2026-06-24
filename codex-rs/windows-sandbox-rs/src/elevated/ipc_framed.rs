@@ -58,6 +58,7 @@ pub enum Message {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SpawnRequest {
     pub command: Vec<String>,
+    pub application_path: PathBuf,
     pub cwd: PathBuf,
     pub env: HashMap<String, String>,
     pub permission_profile: PermissionProfile,
@@ -217,6 +218,7 @@ mod tests {
             message: Message::SpawnRequest {
                 payload: Box::new(SpawnRequest {
                     command: vec!["cmd.exe".to_string(), "/c".to_string(), "ver".to_string()],
+                    application_path: PathBuf::from(r"C:\Windows\System32\cmd.exe"),
                     cwd: PathBuf::from(r"C:\workspace"),
                     env: HashMap::new(),
                     permission_profile: PermissionProfile::read_only(),

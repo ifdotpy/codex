@@ -75,9 +75,11 @@ unsafe fn ensure_inheritable_stdio(si: &mut STARTUPINFOW) -> Result<()> {
 
 /// # Safety
 /// Caller must provide a valid primary token handle (`h_token`) with appropriate access,
-/// and the `argv`, `cwd`, and `env_map` must remain valid for the duration of the call.
+/// and `application_path`, `argv`, `cwd`, and `env_map` must remain valid for the duration of the
+/// call.
 pub unsafe fn create_process_as_user(
     h_token: HANDLE,
+    application_path: &Path,
     argv: &[String],
     cwd: &Path,
     env_map: &HashMap<String, String>,
@@ -87,6 +89,7 @@ pub unsafe fn create_process_as_user(
 ) -> Result<CreatedProcess> {
     let cmdline_str = argv_to_command_line(argv);
     let mut cmdline: Vec<u16> = to_wide(&cmdline_str);
+    let application_name = to_wide(application_path);
     let env_block = make_env_block(env_map);
     let desktop = LaunchDesktop::prepare(use_private_desktop, logs_base_dir)?;
     let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
@@ -123,7 +126,7 @@ pub unsafe fn create_process_as_user(
             let creation_flags = CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
             let ok = CreateProcessAsUserW(
                 h_token,
-                std::ptr::null(),
+                application_name.as_ptr(),
                 cmdline.as_mut_ptr(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
@@ -164,7 +167,7 @@ pub unsafe fn create_process_as_user(
             let creation_flags = CREATE_UNICODE_ENVIRONMENT;
             let ok = CreateProcessAsUserW(
                 h_token,
-                std::ptr::null(),
+                application_name.as_ptr(),
                 cmdline.as_mut_ptr(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
@@ -227,6 +230,7 @@ pub struct PipeSpawnHandles {
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_process_with_pipes(
     h_token: HANDLE,
+    application_path: &Path,
     argv: &[String],
     cwd: &Path,
     env_map: &HashMap<String, String>,
@@ -270,6 +274,7 @@ pub fn spawn_process_with_pipes(
     let spawn_result = unsafe {
         create_process_as_user(
             h_token,
+            application_path,
             argv,
             cwd,
             env_map,

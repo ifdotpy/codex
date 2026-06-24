@@ -99,6 +99,7 @@ pub struct SandboxSetupRequest<'a> {
 #[derive(Default)]
 pub struct SetupRootOverrides {
     pub read_roots: Option<Vec<PathBuf>>,
+    pub required_read_file: Option<PathBuf>,
     pub read_roots_include_platform_defaults: bool,
     pub write_roots: Option<Vec<PathBuf>>,
     pub deny_read_paths: Option<Vec<PathBuf>>,
@@ -171,6 +172,7 @@ pub fn run_setup_refresh_with_extra_read_roots(
         },
         SetupRootOverrides {
             read_roots: Some(read_roots),
+            required_read_file: None,
             read_roots_include_platform_defaults: false,
             write_roots: Some(Vec::new()),
             deny_read_paths: None,
@@ -980,6 +982,12 @@ fn build_payload_roots(
     read_roots = filter_ssh_config_dependency_roots(read_roots);
     let write_root_set: HashSet<PathBuf> = write_roots.iter().cloned().collect();
     read_roots.retain(|root| !write_root_set.contains(root));
+    if let Some(required) = overrides.required_read_file.as_ref()
+        && let Some(required) = canonical_existing(std::slice::from_ref(required)).pop()
+        && !read_roots.contains(&required)
+    {
+        read_roots.push(required);
+    }
     (read_roots, write_roots)
 }
 
@@ -1712,6 +1720,7 @@ mod tests {
             },
             &super::SetupRootOverrides {
                 read_roots: Some(vec![readable_root.clone()]),
+                required_read_file: None,
                 read_roots_include_platform_defaults: true,
                 write_roots: None,
                 deny_read_paths: None,
@@ -1759,6 +1768,7 @@ mod tests {
             },
             &super::SetupRootOverrides {
                 read_roots: Some(vec![readable_root.clone()]),
+                required_read_file: None,
                 read_roots_include_platform_defaults: false,
                 write_roots: None,
                 deny_read_paths: None,
@@ -1815,6 +1825,7 @@ mod tests {
         };
         let overrides = super::SetupRootOverrides {
             read_roots: None,
+            required_read_file: None,
             read_roots_include_platform_defaults: false,
             write_roots: Some(override_roots.clone()),
             deny_read_paths: None,

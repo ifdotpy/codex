@@ -15,6 +15,7 @@ use crate::spawn_prep::apply_legacy_session_acl_rules;
 use crate::spawn_prep::legacy_session_capability_roots;
 use crate::spawn_prep::prepare_legacy_session_security;
 use crate::spawn_prep::prepare_legacy_spawn_context;
+use crate::winutil::resolve_windows_executable;
 use anyhow::Result;
 use codex_protocol::models::PermissionProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -69,9 +70,14 @@ fn spawn_legacy_process(
     writer_rx: mpsc::Receiver<Vec<u8>>,
     logs_base_dir: Option<&Path>,
 ) -> Result<LegacyProcessHandles> {
+    let program = command
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("cannot start an empty Windows command"))?;
+    let application_path = resolve_windows_executable(program, cwd, env_map)?;
     let (pi, output_join, writer_handle, hpc, conpty_owner, desktop) = if tty {
         let (pi, mut conpty) = spawn_conpty_process_as_user(
             h_token,
+            &application_path,
             command,
             cwd,
             env_map,
@@ -89,6 +95,7 @@ fn spawn_legacy_process(
     } else {
         let pipe_handles = spawn_process_with_pipes(
             h_token,
+            &application_path,
             command,
             cwd,
             env_map,

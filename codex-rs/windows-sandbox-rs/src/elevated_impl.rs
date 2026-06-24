@@ -28,7 +28,6 @@ mod windows_impl {
     use crate::cap::load_or_create_cap_sids;
     use crate::cap::workspace_write_cap_sid_for_root;
     use crate::env::ensure_non_interactive_pager;
-    use crate::env::inherit_path_env;
     use crate::env::normalize_null_device_env;
     use crate::identity::refresh_logon_sandbox_creds;
     use crate::identity::require_logon_sandbox_creds;
@@ -49,6 +48,7 @@ mod windows_impl {
     use crate::sandbox_utils::ensure_codex_home_exists;
     use crate::sandbox_utils::inject_git_safe_directory;
     use crate::setup::effective_write_roots_for_permissions;
+    use crate::spawn_prep::read_roots_with_resolved_executable;
     use crate::token::LocalSid;
     use anyhow::Result;
     use codex_utils_absolute_path::AbsolutePathBuf;
@@ -131,8 +131,15 @@ mod windows_impl {
             .collect::<Vec<_>>();
         normalize_null_device_env(&mut env_map);
         ensure_non_interactive_pager(&mut env_map);
-        inherit_path_env(&mut env_map);
         inject_git_safe_directory(&mut env_map, cwd);
+        let (application_path, read_roots) = read_roots_with_resolved_executable(
+            &permissions,
+            cwd,
+            &env_map,
+            codex_home,
+            &command,
+            read_roots_override,
+        )?;
         // Use a temp-based log dir that the sandbox user can write.
         let sandbox_base = codex_home.join(".sandbox");
         ensure_codex_home_exists(&sandbox_base)?;
@@ -144,7 +151,8 @@ mod windows_impl {
             cwd,
             &env_map,
             codex_home,
-            read_roots_override,
+            Some(&read_roots),
+            Some(application_path.as_path()),
             read_roots_include_platform_defaults,
             write_roots_override,
             &deny_read_paths_override,
@@ -183,6 +191,7 @@ mod windows_impl {
         (|| -> Result<CaptureResult> {
             let spawn_request = SpawnRequest {
                 command: command.clone(),
+                application_path: application_path.clone(),
                 cwd: cwd.to_path_buf(),
                 env: env_map.clone(),
                 permission_profile: permission_profile.clone(),
@@ -212,7 +221,8 @@ mod windows_impl {
                         cwd,
                         &env_map,
                         codex_home,
-                        read_roots_override,
+                        Some(&read_roots),
+                        Some(application_path.as_path()),
                         read_roots_include_platform_defaults,
                         write_roots_override,
                         &deny_read_paths_override,

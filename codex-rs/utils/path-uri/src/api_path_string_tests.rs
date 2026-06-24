@@ -359,6 +359,30 @@ fn relative_api_path_serializes_and_deserializes_unchanged() {
 }
 
 #[test]
+fn windows_opaque_api_paths_round_trip_and_join() {
+    for (base, relative, expected) in [
+        (
+            r"\\localhost\C$\Users\alice\repo",
+            r"..\other",
+            r"\\localhost\C$\Users\alice\other",
+        ),
+        (
+            r"\\?\C:\workspace\repo",
+            "subdir",
+            r"\\?\C:\workspace\repo\subdir",
+        ),
+    ] {
+        let path = LegacyAppPathString(base.to_string());
+        let uri = path
+            .to_path_uri(PathConvention::Windows)
+            .expect("opaque Windows path should parse");
+
+        let joined = uri.join(relative).expect("join relative workdir");
+        assert_eq!(joined.inferred_native_path_string(), expected);
+    }
+}
+
+#[test]
 fn relative_api_path_is_invalid_when_converted_to_a_path_uri() {
     let raw_path = "subdir";
     let path = serde_json::from_value::<LegacyAppPathString>(serde_json::json!(raw_path))

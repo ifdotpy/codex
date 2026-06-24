@@ -1,6 +1,10 @@
 use anyhow::Result;
+use anyhow::anyhow;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
+use std::path::Path;
+use std::path::PathBuf;
 use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Foundation::HLOCAL;
@@ -11,6 +15,7 @@ use windows_sys::Win32::Security::CopySid;
 use windows_sys::Win32::Security::GetLengthSid;
 use windows_sys::Win32::Security::LookupAccountNameW;
 use windows_sys::Win32::Security::SID_NAME_USE;
+use windows_sys::Win32::Storage::FileSystem::GetBinaryTypeW;
 use windows_sys::Win32::System::Diagnostics::Debug::FORMAT_MESSAGE_ALLOCATE_BUFFER;
 use windows_sys::Win32::System::Diagnostics::Debug::FORMAT_MESSAGE_FROM_SYSTEM;
 use windows_sys::Win32::System::Diagnostics::Debug::FORMAT_MESSAGE_IGNORE_INSERTS;
@@ -71,6 +76,120 @@ pub fn argv_to_command_line(argv: &[String]) -> String {
         .map(|arg| quote_windows_arg(arg))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Resolves a Windows program using the environment and working directory that
+/// will be passed to the child process.
+pub fn resolve_windows_executable(
+    program: &str,
+    cwd: &Path,
+    env_map: &HashMap<String, String>,
+) -> Result<PathBuf> {
+    if program.is_empty() {
+        return Err(anyhow!("cannot resolve an empty Windows executable"));
+    }
+    if !cwd.is_absolute() {
+        return Err(anyhow!("Windows executable cwd must be absolute"));
+    }
+
+    let program_path = Path::new(program);
+    if is_drive_relative(program_path) {
+        return Err(anyhow!(
+            "drive-relative Windows executable paths are not supported"
+        ));
+    }
+    let has_path = program_path.is_absolute()
+        || program.contains(['\\', '/'])
+        || program_path.components().count() > 1;
+    let search_dirs = if has_path {
+        Vec::new()
+    } else {
+        std::iter::once(cwd.to_path_buf())
+            .chain(
+                windows_env_value(env_map, "PATH")
+                    .into_iter()
+                    .flat_map(|path| std::env::split_paths(path)),
+            )
+            .filter(|dir| !is_drive_relative(dir))
+            .map(|dir| {
+                if dir.is_absolute() {
+                    dir
+                } else {
+                    cwd.join(dir)
+                }
+            })
+            .collect()
+    };
+    let path_extensions = windows_env_value(env_map, "PATHEXT")
+        .unwrap_or(".EXE")
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| extension.starts_with('.') && extension.len() > 1)
+        .collect::<Vec<_>>();
+    let has_extension = program_path.extension().is_some();
+
+    let candidates = if has_path {
+        vec![if program_path.is_absolute() {
+            program_path.to_path_buf()
+        } else {
+            cwd.join(program_path)
+        }]
+    } else {
+        search_dirs
+            .into_iter()
+            .map(|dir| dir.join(program_path))
+            .collect()
+    };
+    for candidate in candidates {
+        if !candidate.is_absolute() {
+            continue;
+        }
+        if (has_path || has_extension) && is_windows_executable_candidate(&candidate) {
+            return Ok(candidate);
+        }
+        if !has_extension {
+            for extension in &path_extensions {
+                let mut candidate = candidate.clone().into_os_string();
+                candidate.push(extension);
+                let candidate = PathBuf::from(candidate);
+                if is_windows_executable_candidate(&candidate) {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "Windows executable `{program}` was not found using the child PATH and PATHEXT"
+    ))
+}
+
+fn is_drive_relative(path: &Path) -> bool {
+    !path.has_root()
+        && matches!(
+            path.components().next(),
+            Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::Disk(_))
+        )
+}
+
+fn windows_env_value<'a>(env_map: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
+    env_map
+        .get(key)
+        .or_else(|| {
+            env_map
+                .iter()
+                .find(|(existing, _)| existing.eq_ignore_ascii_case(key))
+                .map(|(_, value)| value)
+        })
+        .map(String::as_str)
+}
+
+fn is_windows_executable_candidate(path: &Path) -> bool {
+    let validation_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = to_wide(validation_path);
+    let mut binary_type = 0;
+    unsafe { GetBinaryTypeW(path.as_ptr(), &mut binary_type) != 0 }
 }
 
 // Produce a readable description for a Win32 error code.
@@ -208,7 +327,17 @@ fn sid_bytes_from_string(sid_str: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::argv_to_command_line;
+    use super::resolve_windows_executable;
     use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::os::windows::ffi::OsStrExt;
+    use tempfile::TempDir;
+
+    fn copy_test_executable(path: &std::path::Path) {
+        fs::copy(std::env::current_exe().expect("test executable"), path)
+            .expect("copy executable fixture");
+    }
 
     #[test]
     fn argv_to_command_line_quotes_each_argument_independently() {
@@ -237,5 +366,58 @@ mod tests {
             argv_to_command_line(&argv),
             "pwsh.exe -Command \"Write-Output \\\"hello world\\\"\""
         );
+    }
+
+    #[test]
+    fn bare_names_search_child_cwd_before_path_and_ignore_extensionless_files() {
+        let tempdir = TempDir::new().expect("tempdir");
+        fs::write(tempdir.path().join("tool"), []).expect("write decoy fixture");
+        let expected = tempdir.path().join("tool.exe");
+        copy_test_executable(&expected);
+        let bin = tempdir.path().join("bin");
+        fs::create_dir(&bin).expect("create PATH directory");
+        copy_test_executable(&bin.join("tool.exe"));
+        let env_map = HashMap::from([("PATH".to_string(), bin.display().to_string())]);
+
+        let resolved = resolve_windows_executable("tool", tempdir.path(), &env_map)
+            .expect("resolve executable suffix");
+
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn preserves_long_child_working_directories() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let mut cwd = tempdir.path().join("workspace");
+        while cwd.as_os_str().encode_wide().count() <= 280 {
+            cwd.push("long-working-directory-segment");
+        }
+        let bin = cwd.join("bin");
+        fs::create_dir_all(&bin).expect("create long working directory");
+        let expected = bin.join("tool.exe");
+        copy_test_executable(&expected);
+        let env_map = HashMap::from([("PATH".to_string(), "bin".to_string())]);
+
+        let resolved = resolve_windows_executable("tool.exe", &cwd, &env_map)
+            .expect("resolve from long child working directory");
+
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn rejects_ambient_path_fallback_and_ambiguous_names() {
+        let tempdir = TempDir::new().expect("tempdir");
+        fs::write(tempdir.path().join("tool.txt.exe"), []).expect("write decoy fixture");
+        let env_map = HashMap::from([
+            ("PATH".to_string(), tempdir.path().display().to_string()),
+            ("PATHEXT".to_string(), ".EXE".to_string()),
+        ]);
+
+        resolve_windows_executable("cmd", tempdir.path(), &env_map)
+            .expect_err("parent PATH must not be searched");
+        resolve_windows_executable("tool.txt", tempdir.path(), &env_map)
+            .expect_err("existing extensions must not be extended");
+        resolve_windows_executable("C:tool.exe", tempdir.path(), &env_map)
+            .expect_err("drive-relative paths must be rejected");
     }
 }

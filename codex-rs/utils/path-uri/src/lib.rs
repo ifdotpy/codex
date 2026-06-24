@@ -32,7 +32,8 @@ const BAD_PATH_URI_PREFIX: &str = "file:///%00/bad/path/";
 /// URL, and the URI cannot be mutated after construction. [`Self::basename`],
 /// [`Self::parent`], and [`Self::join`] operate on URI path segments without
 /// interpreting them using the operating system running Codex. Fallback URIs
-/// created by [`Self::from_abs_path`] are opaque to these lexical operations.
+/// created by [`Self::from_abs_path`] are opaque to these lexical operations,
+/// except that Windows drive and UNC fallbacks support lexical joins.
 ///
 /// `file:` paths retain their URI spelling so they can be parsed independently
 /// of the current host. A local POSIX `file:` URI can also retain
@@ -66,10 +67,24 @@ impl PathUri {
     /// encoding of the original path (Unix bytes or Windows UTF-16LE). This
     /// includes paths containing nulls and, on Windows, unsupported prefix
     /// kinds such as device and generic verbatim namespaces, non-Unicode path
-    /// or UNC components, and UNC server names that are not valid URL hosts.
+    /// or UNC components, localhost UNC paths, and UNC server names that are
+    /// not valid URL hosts.
     /// The encoded null reserves a URI namespace that cannot collide with a
     /// real path on Unix or Windows.
     pub fn from_abs_path(path: &AbsolutePathBuf) -> Self {
+        #[cfg(windows)]
+        if matches!(
+            path.as_path().components().next(),
+            Some(std::path::Component::Prefix(prefix))
+                if matches!(
+                    prefix.kind(),
+                    std::path::Prefix::UNC(server, _)
+                        | std::path::Prefix::VerbatimUNC(server, _)
+                        if server.to_string_lossy().eq_ignore_ascii_case("localhost")
+                )
+        ) {
+            return Self::from_opaque_path_bytes(&windows_path_bytes(path.as_path()));
+        }
         if let Ok(url) = Url::from_file_path(path.as_path())
             && let Ok(uri) = Self::try_from(url)
         {
@@ -82,14 +97,7 @@ impl PathUri {
             path.as_path().as_os_str().as_bytes().to_vec()
         };
         #[cfg(windows)]
-        let path_bytes = {
-            use std::os::windows::ffi::OsStrExt;
-            path.as_path()
-                .as_os_str()
-                .encode_wide()
-                .flat_map(u16::to_le_bytes)
-                .collect::<Vec<_>>()
-        };
+        let path_bytes = windows_path_bytes(path.as_path());
         Self::from_opaque_path_bytes(&path_bytes)
     }
 
@@ -290,7 +298,7 @@ impl PathUri {
     /// containing a null character are rejected because they cannot be safely
     /// converted to native paths.
     /// Opaque fallback URIs created by [`Self::from_abs_path`] reject non-empty
-    /// joins.
+    /// joins unless they encode a Windows drive or UNC path.
     pub fn join(&self, path: &str) -> Result<Self, PathUriParseError> {
         if path.contains('\0') {
             return Err(PathUriParseError::InvalidFileUriPath {
@@ -318,7 +326,12 @@ impl PathUri {
                 path: path.to_string(),
             });
         }
-        if decode_bad_path_uri(&self.0).is_some() {
+        if let Some(path_bytes) = decode_bad_path_uri(&self.0) {
+            if convention == PathConvention::Windows
+                && let Some(joined) = join_opaque_windows_path(&path_bytes, path)
+            {
+                return Ok(joined);
+            }
             return Err(PathUriParseError::InvalidFileUriPath {
                 path: self.to_string(),
             });
@@ -402,7 +415,7 @@ impl PathUri {
             };
             if let Some(decoded_path) = decoded_path
                 && let Ok(path) = AbsolutePathBuf::from_absolute_path_checked(decoded_path)
-                && Self::from_abs_path(&path).eq(self)
+                && (cfg!(windows) || Self::from_abs_path(&path).eq(self))
             {
                 return Ok(path);
             }
@@ -431,6 +444,41 @@ impl PathUri {
                 },
             )
         })
+    }
+
+    /// Converts this URI to an absolute Windows path without normalizing its
+    /// native prefix or UNC spelling.
+    #[cfg(windows)]
+    pub fn to_windows_path_buf(&self) -> io::Result<PathBuf> {
+        let invalid = || {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                PathUriParseError::InvalidFileUriPath {
+                    path: self.to_string(),
+                },
+            )
+        };
+        if self.infer_path_convention() != Some(PathConvention::Windows) {
+            return Err(invalid());
+        }
+        if let Some(path_bytes) = decode_bad_path_uri(&self.0) {
+            if !path_bytes.len().is_multiple_of(2) {
+                return Err(invalid());
+            }
+            use std::os::windows::ffi::OsStringExt;
+            let path_wide = path_bytes
+                .chunks_exact(2)
+                .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+                .collect::<Vec<_>>();
+            let path = PathBuf::from(std::ffi::OsString::from_wide(&path_wide));
+            if path.is_absolute() && windows_path_bytes(&path) == path_bytes {
+                return Ok(path);
+            }
+            return Err(invalid());
+        }
+
+        let path = self.0.to_file_path().map_err(|()| invalid())?;
+        path.is_absolute().then_some(path).ok_or_else(invalid)
     }
 
     /// Returns a clone of the canonical URL.
@@ -623,6 +671,9 @@ fn parse_windows_path(path: &str) -> Option<PathUri> {
         let mut components = path[2..].split(is_windows_separator_char);
         let host = components.next().filter(|host| !host.is_empty())?;
         let share = components.next().filter(|share| !share.is_empty())?;
+        if host.eq_ignore_ascii_case("localhost") {
+            return Some(windows_opaque_path_uri(path));
+        }
         return path_uri_from_segments(Some(host), std::iter::once(share).chain(components))
             .or_else(|| Some(windows_opaque_path_uri(path)));
     }
@@ -654,6 +705,88 @@ fn windows_opaque_path_uri(path: &str) -> PathUri {
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
     PathUri::from_opaque_path_bytes(&path_bytes)
+}
+
+fn join_opaque_windows_path(path_bytes: &[u8], path: &str) -> Option<PathUri> {
+    if !path_bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let path_wide = path_bytes
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect::<Vec<_>>();
+    let base = String::from_utf16(&path_wide).ok()?;
+    if base.contains('\0') {
+        return None;
+    }
+    let leading_unc = base
+        .as_bytes()
+        .get(..2)
+        .is_some_and(|prefix| prefix.iter().all(|byte| is_windows_separator_byte(*byte)));
+    let mut components = base
+        .split(is_windows_separator_char)
+        .filter(|component| !component.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let anchor_depth = if leading_unc {
+        match components.as_slice() {
+            [namespace, unc, _server, _share, ..]
+                if namespace == "?" && unc.eq_ignore_ascii_case("UNC") =>
+            {
+                4
+            }
+            [namespace, drive, ..] if namespace == "?" && is_windows_drive_uri_segment(drive) => 2,
+            [namespace, ..] if matches!(namespace.as_str(), "?" | ".") => return None,
+            [_server, _share, ..] => 2,
+            _ => return None,
+        }
+    } else if components
+        .first()
+        .is_some_and(|component| is_windows_drive_uri_segment(component))
+    {
+        1
+    } else {
+        return None;
+    };
+
+    let path_bytes = path.as_bytes();
+    let root_relative = matches!(
+        path_bytes,
+        [b'\\' | b'/', rest @ ..] if !matches!(rest, [b'\\' | b'/', ..])
+    );
+    if root_relative {
+        components.truncate(anchor_depth);
+    }
+    for component in path.split(is_windows_separator_char) {
+        match component {
+            "" | "." => {}
+            ".." => {
+                if components.len() > anchor_depth {
+                    components.pop();
+                }
+            }
+            component => components.push(component.to_string()),
+        }
+    }
+
+    let mut joined = components.join(r"\");
+    if leading_unc {
+        joined.insert_str(0, r"\\");
+    }
+    if joined.ends_with(':') {
+        joined.push('\\');
+    }
+    Some(windows_opaque_path_uri(&joined))
+}
+
+#[cfg(windows)]
+fn windows_path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+
+    path.as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect()
 }
 
 fn is_windows_separator_char(character: char) -> bool {

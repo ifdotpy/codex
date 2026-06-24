@@ -181,6 +181,66 @@ struct ReadAclSubjects<'a> {
     rx_psids: &'a [*mut c_void],
 }
 
+fn apply_read_acls_for_roots(
+    read_roots: &[PathBuf],
+    sandbox_group_psid: *mut c_void,
+    log: &mut dyn Write,
+    refresh_errors: &mut Vec<String>,
+    inheritance: u32,
+) -> Result<()> {
+    let users_sid = resolve_sid("Users")?;
+    let users_psid = sid_bytes_to_psid(&users_sid)?;
+    let auth_sid = resolve_sid("Authenticated Users")?;
+    let auth_psid = sid_bytes_to_psid(&auth_sid)?;
+    let everyone_sid = resolve_sid("Everyone")?;
+    let everyone_psid = sid_bytes_to_psid(&everyone_sid)?;
+    let rx_psids = vec![users_psid, auth_psid, everyone_psid];
+    let subjects = ReadAclSubjects {
+        sandbox_group_psid,
+        rx_psids: &rx_psids,
+    };
+    let result = apply_read_acls(
+        read_roots,
+        &subjects,
+        log,
+        refresh_errors,
+        FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+        "read",
+        inheritance,
+    );
+    unsafe {
+        if !users_psid.is_null() {
+            LocalFree(users_psid as HLOCAL);
+        }
+        if !auth_psid.is_null() {
+            LocalFree(auth_psid as HLOCAL);
+        }
+        if !everyone_psid.is_null() {
+            LocalFree(everyone_psid as HLOCAL);
+        }
+    }
+    result
+}
+
+fn immediate_read_roots(read_roots: &[PathBuf], command_cwd: &Path) -> Vec<PathBuf> {
+    let mut roots = read_roots
+        .iter()
+        .filter(|root| {
+            std::fs::symlink_metadata(root).is_ok_and(|metadata| {
+                let file_type = metadata.file_type();
+                file_type.is_file() || file_type.is_symlink()
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let command_cwd = canonicalize_path(command_cwd);
+    if read_roots.iter().any(|root| command_cwd.starts_with(root)) && !roots.contains(&command_cwd)
+    {
+        roots.push(command_cwd);
+    }
+    roots
+}
+
 fn apply_read_acls(
     read_roots: &[PathBuf],
     subjects: &ReadAclSubjects<'_>,
@@ -511,37 +571,13 @@ fn run_read_acl_only(payload: &Payload, log: &mut dyn Write) -> Result<()> {
     let sandbox_group_psid = sid_bytes_to_psid(&sandbox_group_sid)?;
     let mut refresh_errors: Vec<String> = Vec::new();
     if !payload.read_roots.is_empty() {
-        let users_sid = resolve_sid("Users")?;
-        let users_psid = sid_bytes_to_psid(&users_sid)?;
-        let auth_sid = resolve_sid("Authenticated Users")?;
-        let auth_psid = sid_bytes_to_psid(&auth_sid)?;
-        let everyone_sid = resolve_sid("Everyone")?;
-        let everyone_psid = sid_bytes_to_psid(&everyone_sid)?;
-        let rx_psids = vec![users_psid, auth_psid, everyone_psid];
-        let subjects = ReadAclSubjects {
-            sandbox_group_psid,
-            rx_psids: &rx_psids,
-        };
-        apply_read_acls(
+        apply_read_acls_for_roots(
             &payload.read_roots,
-            &subjects,
+            sandbox_group_psid,
             log,
             &mut refresh_errors,
-            FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
-            "read",
             OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
         )?;
-        unsafe {
-            if !users_psid.is_null() {
-                LocalFree(users_psid as HLOCAL);
-            }
-            if !auth_psid.is_null() {
-                LocalFree(auth_psid as HLOCAL);
-            }
-            if !everyone_psid.is_null() {
-                LocalFree(everyone_psid as HLOCAL);
-            }
-        }
     }
     unsafe {
         if !sandbox_group_psid.is_null() {
@@ -784,6 +820,21 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
             log,
             &format!("applied {} deny-read ACLs", applied_deny_read_paths.len()),
         )?;
+    }
+
+    let required_read_roots = immediate_read_roots(&payload.read_roots, &payload.command_cwd);
+    if !required_read_roots.is_empty() {
+        let mut required_read_errors = Vec::new();
+        apply_read_acls_for_roots(
+            &required_read_roots,
+            sandbox_group_psid,
+            log,
+            &mut required_read_errors,
+            /*inheritance*/ 0,
+        )?;
+        if !required_read_errors.is_empty() {
+            anyhow::bail!("required read ACL setup failed: {required_read_errors:?}");
+        }
     }
 
     if payload.read_roots.is_empty() {

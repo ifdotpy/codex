@@ -33,12 +33,14 @@ pub fn ensure_non_interactive_pager(env_map: &mut HashMap<String, String>) {
 
 // Keep PATH and PATHEXT stable for callers that rely on inheriting the parent process env.
 pub fn inherit_path_env(env_map: &mut HashMap<String, String>) {
-    if !env_map.contains_key("PATH")
+    if !env_map.keys().any(|key| key.eq_ignore_ascii_case("PATH"))
         && let Ok(path) = env::var("PATH")
     {
         env_map.insert("PATH".into(), path);
     }
-    if !env_map.contains_key("PATHEXT")
+    if !env_map
+        .keys()
+        .any(|key| key.eq_ignore_ascii_case("PATHEXT"))
         && let Ok(pathext) = env::var("PATHEXT")
     {
         env_map.insert("PATHEXT".into(), pathext);
@@ -48,8 +50,13 @@ pub fn inherit_path_env(env_map: &mut HashMap<String, String>) {
 fn prepend_path(env_map: &mut HashMap<String, String>, prefix: &str) {
     let existing = env_map
         .get("PATH")
+        .or_else(|| {
+            env_map
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+                .map(|(_, value)| value)
+        })
         .cloned()
-        .or_else(|| env::var("PATH").ok())
         .unwrap_or_default();
     let parts: Vec<String> = existing.split(';').map(ToString::to_string).collect();
     if parts
@@ -65,14 +72,20 @@ fn prepend_path(env_map: &mut HashMap<String, String>, prefix: &str) {
         new_path.push(';');
         new_path.push_str(&existing);
     }
+    env_map.retain(|key, _| !key.eq_ignore_ascii_case("PATH"));
     env_map.insert("PATH".into(), new_path);
 }
 
 fn reorder_pathext_for_stubs(env_map: &mut HashMap<String, String>) {
     let default = env_map
         .get("PATHEXT")
+        .or_else(|| {
+            env_map
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("PATHEXT"))
+                .map(|(_, value)| value)
+        })
         .cloned()
-        .or_else(|| env::var("PATHEXT").ok())
         .unwrap_or(".COM;.EXE;.BAT;.CMD".to_string());
     let exts: Vec<String> = default
         .split(';')
@@ -99,6 +112,7 @@ fn reorder_pathext_for_stubs(env_map: &mut HashMap<String, String>) {
     let mut combined = Vec::new();
     combined.extend(front);
     combined.extend(rest);
+    env_map.retain(|key, _| !key.eq_ignore_ascii_case("PATHEXT"));
     env_map.insert("PATHEXT".into(), combined.join(";"));
 }
 

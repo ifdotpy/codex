@@ -9,8 +9,6 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-mod cwd_junction;
-
 use anyhow::Context;
 use anyhow::Result;
 use codex_windows_sandbox::ErrorPayload;
@@ -43,7 +41,6 @@ use codex_windows_sandbox::spawn_process_with_pipes;
 use codex_windows_sandbox::to_wide;
 use codex_windows_sandbox::token_mode_for_permission_profile;
 use codex_windows_sandbox::write_frame;
-use std::ffi::OsStr;
 use std::fs::File;
 use std::os::windows::io::FromRawHandle;
 use std::path::Path;
@@ -52,7 +49,6 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use windows_sys::Win32::Foundation::CloseHandle;
-use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
@@ -71,13 +67,10 @@ use windows_sys::Win32::System::JobObjects::SetInformationJobObject;
 use windows_sys::Win32::System::Threading::GetExitCodeProcess;
 use windows_sys::Win32::System::Threading::GetProcessId;
 use windows_sys::Win32::System::Threading::INFINITE;
-use windows_sys::Win32::System::Threading::MUTEX_ALL_ACCESS;
-use windows_sys::Win32::System::Threading::OpenMutexW;
 use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
 use windows_sys::Win32::System::Threading::TerminateProcess;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
 
-const READ_ACL_MUTEX_NAME: &str = "Local\\CodexSandboxReadAcl";
 const WAIT_TIMEOUT: u32 = 0x0000_0102;
 
 struct IpcSpawnedProcess {
@@ -212,43 +205,6 @@ fn read_spawn_request(reader: &mut File) -> Result<SpawnRequest> {
     }
 }
 
-fn read_acl_mutex_exists() -> Result<bool> {
-    let name = to_wide(OsStr::new(READ_ACL_MUTEX_NAME));
-    let handle = unsafe { OpenMutexW(MUTEX_ALL_ACCESS, 0, name.as_ptr()) };
-    if handle == 0 {
-        let err = unsafe { GetLastError() };
-        if err == ERROR_FILE_NOT_FOUND {
-            return Ok(false);
-        }
-        return Err(anyhow::anyhow!("OpenMutexW failed: {err}"));
-    }
-    unsafe {
-        CloseHandle(handle);
-    }
-    Ok(true)
-}
-
-/// Pick an effective CWD, using a junction if the ACL helper is active.
-fn effective_cwd(req_cwd: &Path, log_dir: Option<&Path>) -> PathBuf {
-    let use_junction = match read_acl_mutex_exists() {
-        Ok(exists) => exists,
-        Err(err) => {
-            log_note(
-                &format!(
-                    "junction: failed to probe ACL mutex state: {err}; defaulting to junction cwd"
-                ),
-                log_dir,
-            );
-            true
-        }
-    };
-    if use_junction {
-        cwd_junction::create_cwd_junction(req_cwd, log_dir).unwrap_or_else(|| req_cwd.to_path_buf())
-    } else {
-        req_cwd.to_path_buf()
-    }
-}
-
 fn spawn_ipc_process(req: &SpawnRequest) -> Result<IpcSpawnedProcess> {
     let log_dir = req.codex_home.clone();
     hide_current_user_profile_dir(req.codex_home.as_path());
@@ -294,7 +250,8 @@ fn spawn_ipc_process(req: &SpawnRequest) -> Result<IpcSpawnedProcess> {
         }
     }
 
-    let effective_cwd = effective_cwd(&req.cwd, Some(log_dir.as_path()));
+    // Preserve the requested spelling through CreateProcess, including UNC and verbatim paths.
+    let effective_cwd = req.cwd.clone();
 
     let mut conpty_owner = None;
     let mut hpc_handle: Option<HANDLE> = None;
@@ -302,6 +259,7 @@ fn spawn_ipc_process(req: &SpawnRequest) -> Result<IpcSpawnedProcess> {
     let (pi, stdout_handle, stderr_handle, stdin_handle) = if req.tty {
         let (pi, mut conpty) = codex_windows_sandbox::spawn_conpty_process_as_user(
             h_token.raw(),
+            &req.application_path,
             &req.command,
             &effective_cwd,
             &req.env,
@@ -334,6 +292,7 @@ fn spawn_ipc_process(req: &SpawnRequest) -> Result<IpcSpawnedProcess> {
         };
         let spawned_pipes: PipeSpawnHandles = spawn_process_with_pipes(
             h_token.raw(),
+            &req.application_path,
             &req.command,
             &effective_cwd,
             &req.env,

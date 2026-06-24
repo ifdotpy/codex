@@ -93,12 +93,14 @@ pub fn create_conpty(cols: i16, rows: i16) -> Result<ConptyInstance> {
 /// and the elevated runner path whenever a PTY-backed sandboxed process is needed.
 pub fn spawn_conpty_process_as_user(
     h_token: HANDLE,
+    application_path: &Path,
     argv: &[String],
     cwd: &Path,
     env_map: &HashMap<String, String>,
     use_private_desktop: bool,
     logs_base_dir: Option<&Path>,
 ) -> Result<(PROCESS_INFORMATION, ConptyInstance)> {
+    let application_name = to_wide(application_path);
     let cmdline_str = argv
         .iter()
         .map(|arg| quote_windows_arg(arg))
@@ -132,7 +134,7 @@ pub fn spawn_conpty_process_as_user(
     let ok = unsafe {
         CreateProcessAsUserW(
             h_token,
-            std::ptr::null(),
+            application_name.as_ptr(),
             cmdline.as_mut_ptr(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
