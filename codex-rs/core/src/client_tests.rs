@@ -156,7 +156,7 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
                 text: "please compact".to_string(),
             }],
             phase: None,
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         }],
         base_instructions: BaseInstructions {
             text: "base instructions".to_string(),
@@ -313,6 +313,7 @@ async fn chatgpt_auth_manager(
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
+        /*auth_route_config*/ None,
     )
     .await;
     let auth = auth_manager.auth().await.expect("auth should load");
