@@ -21,7 +21,7 @@ async fn registration_queues_cell_closure_before_driver_starts() {
     let (initial_tx, initial_rx) = oneshot::channel();
     peer.start_cell(
         registration,
-        7,
+        /*request_id*/ 7,
         StartedCell::from_result_receiver(cell_id.clone(), initial_rx),
     );
     let response = RuntimeResponse::Result {
