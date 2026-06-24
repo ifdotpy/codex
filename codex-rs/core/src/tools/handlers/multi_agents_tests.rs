@@ -37,6 +37,7 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -1152,8 +1153,24 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
-    turn.multi_agent_mode = MultiAgentMode::Proactive;
+    config
+        .features
+        .enable(Feature::MultiAgentMode)
+        .expect("test config should allow feature update");
+    turn.model_info.supports_reasoning_summaries = true;
+    turn.model_info
+        .supported_reasoning_levels
+        .push(ReasoningEffortPreset {
+            effort: ReasoningEffort::Ultra,
+            description: "Maximum reasoning with proactive delegation".to_string(),
+        });
+    turn.reasoning_effort = Some(ReasoningEffort::Ultra);
+    turn.multi_agent_mode = MultiAgentMode::ExplicitRequestOnly;
     set_turn_config(&mut turn, config);
+    assert_eq!(
+        crate::session::multi_agents::effective_multi_agent_mode(&turn),
+        Some(MultiAgentMode::Proactive)
+    );
 
     let session = Arc::new(session);
     let turn = Arc::new(turn);
@@ -1191,7 +1208,10 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         child_snapshot.session_source.get_agent_path().as_deref(),
         Some("/root/test_process")
     );
-    assert_eq!(child_snapshot.multi_agent_mode, MultiAgentMode::Proactive);
+    assert_eq!(
+        child_snapshot.multi_agent_mode,
+        MultiAgentMode::ExplicitRequestOnly
+    );
     assert!(manager.captured_ops().iter().any(|(id, op)| {
         *id == child_thread_id
             && matches!(

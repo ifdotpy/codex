@@ -764,7 +764,7 @@ impl ThreadManager {
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
-        let initial_multi_agent_mode = initial_history.get_latest_effective_multi_agent_mode();
+        let initial_multi_agent_mode = initial_history.get_initial_multi_agent_mode();
         Box::pin(self.state.spawn_thread_with_source(
             config,
             initial_history,
@@ -836,7 +836,7 @@ impl ThreadManager {
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
-        let initial_multi_agent_mode = initial_history.get_latest_effective_multi_agent_mode();
+        let initial_multi_agent_mode = initial_history.get_initial_multi_agent_mode();
         Box::pin(self.state.spawn_thread_with_source(
             config,
             initial_history,
@@ -1007,9 +1007,9 @@ impl ThreadManager {
         let initial_multi_agent_mode = match source_thread_id {
             Some(thread_id) => match self.get_thread(thread_id).await {
                 Ok(thread) => Some(thread.config_snapshot().await.multi_agent_mode),
-                Err(_) => history.get_latest_effective_multi_agent_mode(),
+                Err(_) => history.get_initial_multi_agent_mode(),
             },
-            None => history.get_latest_effective_multi_agent_mode(),
+            None => history.get_initial_multi_agent_mode(),
         };
         let multi_agent_version = self
             .state
@@ -1387,7 +1387,7 @@ impl ThreadManagerState {
         let environments =
             default_thread_environment_selections(self.environment_manager.as_ref(), &config.cwd);
         let thread_source = initial_history.get_resumed_thread_source();
-        let initial_multi_agent_mode = initial_history.get_latest_effective_multi_agent_mode();
+        let initial_multi_agent_mode = initial_history.get_initial_multi_agent_mode();
         Box::pin(self.spawn_thread_with_source(
             config,
             initial_history,

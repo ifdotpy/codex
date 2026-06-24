@@ -378,6 +378,10 @@ impl SessionConfiguration {
         if let Some(app_server_client_version) = updates.app_server_client_version.clone() {
             next_configuration.app_server_client_version = Some(app_server_client_version);
         }
+        multi_agents::validate_ultra_reasoning_effort(
+            next_configuration.collaboration_mode.reasoning_effort(),
+            &next_configuration.original_config_do_not_use.features,
+        )?;
         Ok(next_configuration)
     }
 

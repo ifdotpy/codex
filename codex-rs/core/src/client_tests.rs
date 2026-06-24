@@ -31,6 +31,7 @@ use codex_protocol::auth::AuthMode;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -66,6 +67,20 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+#[test]
+fn ultra_reasoning_uses_max_for_requests() {
+    assert_eq!(
+        (
+            super::reasoning_effort_for_request(ReasoningEffort::Ultra),
+            super::reasoning_effort_for_request(ReasoningEffort::High),
+        ),
+        (
+            ReasoningEffort::Custom("max".to_string()),
+            ReasoningEffort::High,
+        )
+    );
+}
 
 fn test_model_client(session_source: SessionSource) -> ModelClient {
     let provider = create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);

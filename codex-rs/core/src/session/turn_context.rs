@@ -6,6 +6,7 @@ use codex_core_skills::HostSkillsSnapshot;
 use codex_file_system::FileSystemSandboxContext;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
+use codex_models_manager::model_presets::hide_ultra_reasoning_effort;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::models::AdditionalPermissionProfile;
@@ -182,6 +183,16 @@ impl TurnContext {
         }
     }
 
+    pub(crate) fn ultra_reasoning_active(&self) -> bool {
+        self.config.features.enabled(Feature::MultiAgentMode)
+            && self
+                .model_info
+                .supported_reasoning_levels
+                .iter()
+                .any(|preset| preset.effort == ReasoningEffortConfig::Ultra)
+            && self.effective_reasoning_effort() == Some(ReasoningEffortConfig::Ultra)
+    }
+
     pub(crate) fn effective_reasoning_effort_for_tracing(&self) -> String {
         self.effective_reasoning_effort()
             .map(|effort| effort.to_string())
@@ -246,9 +257,12 @@ impl TurnContext {
             Some(reasoning_effort.clone()),
             /*developer_instructions*/ None,
         );
-        let available_models = models_manager
+        let mut available_models = models_manager
             .list_models(RefreshStrategy::OnlineIfUncached)
             .await;
+        if !config.features.enabled(Feature::MultiAgentMode) {
+            hide_ultra_reasoning_effort(&mut available_models);
+        }
 
         Self {
             sub_id: self.sub_id.clone(),
@@ -375,11 +389,8 @@ impl TurnContext {
             personality: self.personality,
             collaboration_mode: Some(self.collaboration_mode.clone()),
             multi_agent_version: Some(self.multi_agent_version),
-            multi_agent_mode: super::multi_agents::effective_multi_agent_mode(
-                self.multi_agent_version,
-                &self.session_source,
-                self.multi_agent_mode,
-            ),
+            multi_agent_mode: super::multi_agents::effective_multi_agent_mode(self),
+            selected_multi_agent_mode: Some(self.multi_agent_mode),
             realtime_active: Some(self.realtime_active),
             effort: self.reasoning_effort.clone(),
             summary: ReasoningSummaryConfig::Auto,
@@ -506,7 +517,10 @@ impl Session {
         let auth_manager_for_context = auth_manager.clone();
         let provider_for_context = create_model_provider(provider, auth_manager);
         let session_telemetry_for_context = session_telemetry;
-        let available_models = models_manager.try_list_models().unwrap_or_default();
+        let mut available_models = models_manager.try_list_models().unwrap_or_default();
+        if !per_turn_config.features.enabled(Feature::MultiAgentMode) {
+            hide_ultra_reasoning_effort(&mut available_models);
+        }
         let unified_exec_shell_mode = UnifiedExecShellMode::for_session(
             codex_tools::unified_exec_feature_mode_for_features(per_turn_config.features.get()),
             crate::tools::tool_user_shell_type(user_shell),
@@ -644,13 +658,29 @@ impl Session {
                 .await;
         }
 
-        Ok(self
+        let turn_context = self
             .new_turn_from_configuration(
                 sub_id,
                 session_configuration,
                 updates.final_output_json_schema,
             )
-            .await)
+            .await;
+        if let Err(err) = super::multi_agents::validate_ultra_reasoning_effort(
+            turn_context.effective_reasoning_effort(),
+            &turn_context.config.features,
+        ) {
+            let message = err.to_string();
+            self.send_event_raw(Event {
+                id: turn_context.sub_id.clone(),
+                msg: EventMsg::Error(ErrorEvent {
+                    message: message.clone(),
+                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                }),
+            })
+            .await;
+            return Err(CodexErr::InvalidRequest(message));
+        }
+        Ok(turn_context)
     }
 
     async fn new_turn_from_configuration(

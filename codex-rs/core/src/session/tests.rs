@@ -3024,6 +3024,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         collaboration_mode: Some(turn_context.collaboration_mode.clone()),
         multi_agent_version: None,
         multi_agent_mode: None,
+        selected_multi_agent_mode: None,
         realtime_active: Some(turn_context.realtime_active),
         effort: turn_context.reasoning_effort.clone(),
         summary: codex_protocol::config_types::ReasoningSummary::Auto,

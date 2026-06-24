@@ -1,6 +1,11 @@
+use crate::config::ConstraintError;
+use crate::config::ConstraintResult;
+use crate::config::ManagedFeatures;
 use crate::config::MultiAgentV2Config;
 use crate::session::turn_context::TurnContext;
+use codex_features::Feature;
 use codex_protocol::config_types::MultiAgentMode;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -35,16 +40,18 @@ fn configured_usage_hint_text_for_source<'a>(
     }
 }
 
-pub(crate) fn effective_multi_agent_mode(
-    multi_agent_version: MultiAgentVersion,
-    session_source: &SessionSource,
-    multi_agent_mode: MultiAgentMode,
-) -> Option<MultiAgentMode> {
-    if multi_agent_version != MultiAgentVersion::V2 {
+pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<MultiAgentMode> {
+    if turn_context.multi_agent_version != MultiAgentVersion::V2 {
         return None;
     }
 
-    match session_source {
+    let multi_agent_mode = if turn_context.ultra_reasoning_active() {
+        MultiAgentMode::Proactive
+    } else {
+        turn_context.multi_agent_mode
+    };
+
+    match &turn_context.session_source {
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
         | SessionSource::Cli
         | SessionSource::VSCode
@@ -54,4 +61,21 @@ pub(crate) fn effective_multi_agent_mode(
         | SessionSource::Unknown => Some(multi_agent_mode),
         SessionSource::Internal(_) | SessionSource::SubAgent(_) => None,
     }
+}
+
+pub(super) fn validate_ultra_reasoning_effort(
+    effort: Option<ReasoningEffort>,
+    features: &ManagedFeatures,
+) -> ConstraintResult<()> {
+    if effort == Some(ReasoningEffort::Ultra) && !features.enabled(Feature::MultiAgentMode) {
+        return Err(ConstraintError::InvalidValue {
+            field_name: "reasoning_effort",
+            candidate: ReasoningEffort::Ultra.to_string(),
+            allowed:
+                "reasoning effort other than ultra unless features.multi_agent_mode is enabled"
+                    .to_string(),
+            requirement_source: codex_config::RequirementSource::Unknown,
+        });
+    }
+    Ok(())
 }

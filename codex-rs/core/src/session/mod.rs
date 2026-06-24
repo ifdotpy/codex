@@ -3373,11 +3373,7 @@ impl Session {
         {
             items.push(usage_hint_message);
         }
-        match multi_agents::effective_multi_agent_mode(
-            turn_context.multi_agent_version,
-            &session_source,
-            turn_context.multi_agent_mode,
-        ) {
+        match multi_agents::effective_multi_agent_mode(turn_context) {
             Some(
                 multi_agent_mode
                 @ (MultiAgentMode::ExplicitRequestOnly | MultiAgentMode::Proactive),

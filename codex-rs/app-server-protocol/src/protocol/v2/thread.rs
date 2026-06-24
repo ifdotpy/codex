@@ -94,9 +94,12 @@ pub struct ThreadStartParams {
     pub developer_instructions: Option<String>,
     #[ts(optional = nullable)]
     pub personality: Option<Personality>,
+    /// @deprecated Use Ultra reasoning effort for proactive multi-agent behavior.
+    ///
     /// Set the initial multi-agent mode for this thread. `none` leaves the
     /// multi-agent tools available without injecting mode instructions.
     /// Omitted defaults to `explicitRequestOnly`.
+    #[deprecated(note = "use Ultra reasoning effort for proactive multi-agent behavior")]
     #[experimental("thread/start.multiAgentMode")]
     #[ts(optional = nullable)]
     pub multi_agent_mode: Option<MultiAgentMode>,
@@ -186,7 +189,8 @@ pub struct ThreadStartResponse {
     #[serde(default)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// Current multi-agent mode for this thread.
+    /// @deprecated Use `reasoningEffort` for Ultra behavior.
+    #[deprecated(note = "use reasoning_effort for Ultra behavior")]
     #[experimental("thread/start.multiAgentMode")]
     #[serde(default)]
     pub multi_agent_mode: MultiAgentMode,
@@ -250,7 +254,8 @@ pub struct ThreadSettingsUpdateParams {
     #[experimental("thread/settings/update.collaborationMode")]
     #[ts(optional = nullable)]
     pub collaboration_mode: Option<CollaborationMode>,
-    /// Select the multi-agent mode for subsequent turns.
+    /// @deprecated Use `effort: "ultra"` for proactive multi-agent behavior.
+    #[deprecated(note = "use effort=ultra for proactive multi-agent behavior")]
     #[experimental("thread/settings/update.multiAgentMode")]
     #[ts(optional = nullable)]
     pub multi_agent_mode: Option<MultiAgentMode>,
@@ -279,7 +284,8 @@ pub struct ThreadSettings {
     pub effort: Option<ReasoningEffort>,
     pub summary: Option<ReasoningSummary>,
     pub collaboration_mode: CollaborationMode,
-    /// Current multi-agent mode for this thread.
+    /// @deprecated Use `effort` for Ultra behavior.
+    #[deprecated(note = "use effort for Ultra behavior")]
     #[experimental("thread/settings.multiAgentMode")]
     #[serde(default)]
     pub multi_agent_mode: MultiAgentMode,
@@ -419,7 +425,8 @@ pub struct ThreadResumeResponse {
     #[serde(default)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// Current multi-agent mode for this thread.
+    /// @deprecated Use `reasoningEffort` for Ultra behavior.
+    #[deprecated(note = "use reasoning_effort for Ultra behavior")]
     #[experimental("thread/resume.multiAgentMode")]
     #[serde(default)]
     pub multi_agent_mode: MultiAgentMode,
@@ -578,7 +585,8 @@ pub struct ThreadForkResponse {
     #[serde(default)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// Current multi-agent mode for this thread.
+    /// @deprecated Use `reasoningEffort` for Ultra behavior.
+    #[deprecated(note = "use reasoning_effort for Ultra behavior")]
     #[experimental("thread/fork.multiAgentMode")]
     #[serde(default)]
     pub multi_agent_mode: MultiAgentMode,

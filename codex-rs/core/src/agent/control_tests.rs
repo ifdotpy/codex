@@ -2392,7 +2392,7 @@ async fn spawn_thread_subagent_uses_role_specific_nickname_candidates() {
 }
 
 #[tokio::test]
-async fn resume_thread_subagent_restores_stored_metadata_and_effective_multi_agent_mode() {
+async fn resume_thread_subagent_restores_stored_metadata_and_selected_multi_agent_mode() {
     let (home, config) = test_config().await;
     let thread_store = Arc::new(InMemoryThreadStore::default());
     let manager = ThreadManager::new(
@@ -2449,6 +2449,7 @@ async fn resume_thread_subagent_restores_stored_metadata_and_effective_multi_age
         .await
         .to_turn_context_item();
     child_turn_context.multi_agent_mode = Some(MultiAgentMode::Proactive);
+    child_turn_context.selected_multi_agent_mode = Some(MultiAgentMode::Proactive);
     child_thread
         .codex
         .session

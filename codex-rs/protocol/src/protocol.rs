@@ -2585,7 +2585,11 @@ impl InitialHistory {
         }
     }
 
-    pub fn get_latest_effective_multi_agent_mode(&self) -> Option<MultiAgentMode> {
+    /// Returns the legacy multi-agent selection with which to initialize a session from history.
+    ///
+    /// New turn context items persist the selection separately from the effective model-visible
+    /// mode. Older items only have the effective mode, which remains the compatibility fallback.
+    pub fn get_initial_multi_agent_mode(&self) -> Option<MultiAgentMode> {
         let items = match self {
             InitialHistory::New | InitialHistory::Cleared => return None,
             InitialHistory::Resumed(resumed) => &resumed.history,
@@ -2603,7 +2607,11 @@ impl InitialHistory {
                 | RolloutItem::Compacted(_)
                 | RolloutItem::EventMsg(_) => None,
             })
-            .and_then(|turn_context| turn_context.multi_agent_mode)
+            .and_then(|turn_context| {
+                turn_context
+                    .selected_multi_agent_mode
+                    .or(turn_context.multi_agent_mode)
+            })
     }
 
     pub fn get_resumed_session_sources(&self) -> Option<(SessionSource, Option<ThreadSource>)> {
@@ -3169,6 +3177,9 @@ pub struct TurnContextItem {
     /// Effective model-visible mode used as the durable context-diff baseline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_mode: Option<MultiAgentMode>,
+    /// Underlying legacy selection used to restore session state across resume and fork.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_multi_agent_mode: Option<MultiAgentMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realtime_active: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5539,8 +5550,11 @@ mod tests {
     }
 
     #[test]
-    fn latest_effective_multi_agent_mode_uses_latest_turn_context_even_when_unset() -> Result<()> {
-        let turn_context_item = |multi_agent_mode| -> Result<RolloutItem> {
+    fn initial_multi_agent_mode_prefers_selection_and_falls_back_to_effective_mode() -> Result<()> {
+        let turn_context_item = |multi_agent_mode: Option<MultiAgentMode>,
+                                 selected_multi_agent_mode: Option<MultiAgentMode>,
+                                 effort: Option<ReasoningEffortConfig>|
+         -> Result<RolloutItem> {
             let mut value = json!({
                 "cwd": test_path_buf("/tmp"),
                 "approval_policy": "never",
@@ -5549,16 +5563,50 @@ mod tests {
                 "summary": "auto",
             });
             value["multi_agent_mode"] = serde_json::to_value(multi_agent_mode)?;
+            value["selected_multi_agent_mode"] = serde_json::to_value(selected_multi_agent_mode)?;
+            value["effort"] = serde_json::to_value(effort)?;
             Ok(RolloutItem::TurnContext(serde_json::from_value(value)?))
         };
 
         assert_eq!(
-            InitialHistory::Forked(vec![
-                turn_context_item(Some(MultiAgentMode::Proactive))?,
-                turn_context_item(/*multi_agent_mode*/ None)?,
-            ])
-            .get_latest_effective_multi_agent_mode(),
-            None
+            (
+                InitialHistory::Forked(vec![
+                    turn_context_item(
+                        Some(MultiAgentMode::Proactive),
+                        /*selected_multi_agent_mode*/ None,
+                        /*effort*/ None,
+                    )?,
+                    turn_context_item(
+                        /*multi_agent_mode*/ None, /*selected_multi_agent_mode*/ None,
+                        /*effort*/ None,
+                    )?,
+                ])
+                .get_initial_multi_agent_mode(),
+                InitialHistory::Forked(vec![turn_context_item(
+                    Some(MultiAgentMode::Proactive),
+                    /*selected_multi_agent_mode*/ None,
+                    Some(ReasoningEffortConfig::Ultra),
+                )?])
+                .get_initial_multi_agent_mode(),
+                InitialHistory::Forked(vec![turn_context_item(
+                    Some(MultiAgentMode::Proactive),
+                    Some(MultiAgentMode::None),
+                    Some(ReasoningEffortConfig::Ultra),
+                )?])
+                .get_initial_multi_agent_mode(),
+                InitialHistory::Forked(vec![turn_context_item(
+                    Some(MultiAgentMode::Proactive),
+                    Some(MultiAgentMode::Proactive),
+                    Some(ReasoningEffortConfig::Ultra),
+                )?])
+                .get_initial_multi_agent_mode(),
+            ),
+            (
+                None,
+                Some(MultiAgentMode::Proactive),
+                Some(MultiAgentMode::None),
+                Some(MultiAgentMode::Proactive),
+            )
         );
         Ok(())
     }
@@ -5592,6 +5640,7 @@ mod tests {
             collaboration_mode: None,
             multi_agent_version: None,
             multi_agent_mode: None,
+            selected_multi_agent_mode: None,
             realtime_active: None,
             effort: None,
             summary: ReasoningSummaryConfig::Auto,

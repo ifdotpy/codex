@@ -1,6 +1,8 @@
 use anyhow::Result;
 use codex_features::Feature;
 use codex_protocol::config_types::MultiAgentMode;
+use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 use codex_protocol::protocol::Op;
@@ -154,6 +156,214 @@ async fn multi_agent_mode_is_sticky_and_emits_only_on_change() -> Result<()> {
             count_containing(&fifth, NO_MODE_TEXT),
         ),
         (3, 1, 1, 1)
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ultra_reasoning_uses_proactive_mode_without_changing_legacy_selection() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let test = test_codex()
+        .with_model_info_override("gpt-5.4", |model_info| {
+            model_info.supports_reasoning_summaries = true;
+            model_info
+                .supported_reasoning_levels
+                .push(ReasoningEffortPreset {
+                    effort: ReasoningEffort::Ultra,
+                    description: "Maximum reasoning with proactive delegation".to_string(),
+                });
+        })
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::MultiAgentMode)
+                .expect("test config should allow feature update");
+            config.model_reasoning_effort = Some(ReasoningEffort::Ultra);
+        })
+        .build(&server)
+        .await?;
+
+    submit_turn(&test.codex, "hello", /*mode*/ None).await?;
+
+    assert_eq!(
+        test.codex.config_snapshot().await.multi_agent_mode,
+        MultiAgentMode::ExplicitRequestOnly
+    );
+    let request = response.single_request();
+    assert_eq!(
+        request.body_json()["reasoning"]["effort"].as_str(),
+        Some("max")
+    );
+    let developer_texts = request.message_input_texts("developer");
+    assert_eq!(
+        (
+            developer_texts
+                .iter()
+                .filter(|text| text.contains(PROACTIVE_TEXT))
+                .count(),
+            developer_texts
+                .iter()
+                .filter(|text| text.contains(NO_SPAWN_TEXT))
+                .count(),
+        ),
+        (1, 0)
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ultra_reasoning_uses_max_without_multi_agent_mode_in_v1() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let test = test_codex()
+        .with_model_info_override("gpt-5.4", |model_info| {
+            model_info.supports_reasoning_summaries = true;
+            model_info
+                .supported_reasoning_levels
+                .push(ReasoningEffortPreset {
+                    effort: ReasoningEffort::Ultra,
+                    description: "Maximum reasoning with proactive delegation".to_string(),
+                });
+        })
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::MultiAgentMode)
+                .expect("test config should allow feature update");
+            config.model_reasoning_effort = Some(ReasoningEffort::Ultra);
+        })
+        .build(&server)
+        .await?;
+
+    submit_turn(&test.codex, "hello", /*mode*/ None).await?;
+
+    let request = response.single_request();
+    assert_eq!(
+        request.body_json()["reasoning"]["effort"].as_str(),
+        Some("max")
+    );
+    let developer_texts = request.message_input_texts("developer");
+    assert_eq!(
+        developer_texts
+            .iter()
+            .filter(|text| text.contains(MULTI_AGENT_MODE_OPEN_TAG))
+            .count(),
+        0
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ultra_reasoning_is_rejected_when_feature_is_disabled() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = test_codex()
+        .with_model_info_override("gpt-5.4", |model_info| {
+            model_info.supports_reasoning_summaries = true;
+            model_info
+                .supported_reasoning_levels
+                .push(ReasoningEffortPreset {
+                    effort: ReasoningEffort::Ultra,
+                    description: "Maximum reasoning with proactive delegation".to_string(),
+                });
+        })
+        .build(&server)
+        .await?;
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: ThreadSettingsOverrides {
+                effort: Some(Some(ReasoningEffort::Ultra)),
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let error = wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
+    let EventMsg::Error(error) = error else {
+        unreachable!();
+    };
+    assert!(
+        error.message.contains("features.multi_agent_mode"),
+        "unexpected error: {}",
+        error.message
+    );
+    assert_ne!(
+        test.codex.config_snapshot().await.reasoning_effort,
+        Some(ReasoningEffort::Ultra)
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ultra_reasoning_model_default_is_rejected_when_feature_is_disabled() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = test_codex()
+        .with_model_info_override("gpt-5.4", |model_info| {
+            model_info.supports_reasoning_summaries = true;
+            model_info.default_reasoning_level = Some(ReasoningEffort::Ultra);
+            model_info
+                .supported_reasoning_levels
+                .push(ReasoningEffortPreset {
+                    effort: ReasoningEffort::Ultra,
+                    description: "Maximum reasoning with proactive delegation".to_string(),
+                });
+        })
+        .build(&server)
+        .await?;
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: ThreadSettingsOverrides::default(),
+        })
+        .await?;
+
+    let error = wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
+    let EventMsg::Error(error) = error else {
+        unreachable!();
+    };
+    assert!(
+        error.message.contains("features.multi_agent_mode"),
+        "unexpected error: {}",
+        error.message
     );
 
     Ok(())
@@ -332,6 +542,106 @@ async fn resume_compares_against_previous_effective_multi_agent_mode() -> Result
             count_containing(&texts, PROACTIVE_TEXT),
         ),
         (1, 0, 1)
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_resume_from_ultra_resets_legacy_mode_before_max_turn() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        (1..=2)
+            .map(|index| {
+                sse(vec![
+                    ev_response_created(&format!("resp-{index}")),
+                    ev_completed(&format!("resp-{index}")),
+                ])
+            })
+            .collect(),
+    )
+    .await;
+    let initial = test_codex()
+        .with_model_info_override("gpt-5.4", |model_info| {
+            model_info.supports_reasoning_summaries = true;
+            model_info.default_reasoning_level = Some(ReasoningEffort::Ultra);
+            model_info
+                .supported_reasoning_levels
+                .push(ReasoningEffortPreset {
+                    effort: ReasoningEffort::Ultra,
+                    description: "Maximum reasoning with proactive delegation".to_string(),
+                });
+        })
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::MultiAgentMode)
+                .expect("test config should allow feature update");
+        })
+        .build(&server)
+        .await?;
+    let home = initial.home.clone();
+    let rollout_path = initial
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
+
+    submit_turn(&initial.codex, "before resume", /*mode*/ None).await?;
+    drop(initial);
+
+    let mut resume_builder = test_codex()
+        .with_model_info_override("gpt-5.4", |model_info| {
+            model_info.supports_reasoning_summaries = true;
+            model_info
+                .supported_reasoning_levels
+                .push(ReasoningEffortPreset {
+                    effort: ReasoningEffort::Ultra,
+                    description: "Maximum reasoning with proactive delegation".to_string(),
+                });
+        })
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::MultiAgentMode)
+                .expect("test config should allow feature update");
+            config.model_reasoning_effort = Some(ReasoningEffort::Custom("max".to_string()));
+        });
+    let resumed = resume_builder.resume(&server, home, rollout_path).await?;
+    submit_turn(&resumed.codex, "after resume", /*mode*/ None).await?;
+
+    assert_eq!(
+        (
+            resumed.codex.config_snapshot().await.reasoning_effort,
+            resumed.codex.config_snapshot().await.multi_agent_mode,
+        ),
+        (
+            Some(ReasoningEffort::Custom("max".to_string())),
+            MultiAgentMode::ExplicitRequestOnly,
+        )
+    );
+
+    let requests = responses.requests();
+    let resumed_input = requests[1].input();
+    let texts = developer_texts(&resumed_input);
+    assert_eq!(
+        (
+            count_containing(&texts, MULTI_AGENT_MODE_OPEN_TAG),
+            count_containing(&texts, NO_SPAWN_TEXT),
+            count_containing(&texts, PROACTIVE_TEXT),
+        ),
+        (2, 1, 1)
     );
 
     Ok(())

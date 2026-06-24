@@ -233,6 +233,7 @@ fn turn_context_item_filesystem_uses_workspace_roots_instead_of_cwd() {
         collaboration_mode: None,
         multi_agent_version: None,
         multi_agent_mode: None,
+        selected_multi_agent_mode: None,
         realtime_active: None,
         effort: None,
         summary: codex_protocol::config_types::ReasoningSummary::Auto,

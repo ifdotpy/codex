@@ -107,6 +107,8 @@ use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput;
+use codex_features::Feature;
+use codex_models_manager::model_presets::hide_ultra_reasoning_effort;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::GuardianAssessmentEvent;
@@ -278,7 +280,9 @@ impl AppServerSession {
         let available_models = models
             .data
             .into_iter()
-            .map(model_preset_from_api_model)
+            .map(|model| {
+                model_preset_from_api_model(model, config.features.enabled(Feature::MultiAgentMode))
+            })
             .collect::<Vec<_>>();
         let default_model = config
             .model
@@ -1189,7 +1193,7 @@ pub(crate) fn status_account_display_from_auth_mode(
     }
 }
 
-fn model_preset_from_api_model(model: ApiModel) -> ModelPreset {
+fn model_preset_from_api_model(model: ApiModel, ultra_reasoning_enabled: bool) -> ModelPreset {
     let upgrade = model.upgrade.map(|upgrade_id| {
         let upgrade_info = model.upgrade_info.clone();
         ModelUpgrade {
@@ -1205,7 +1209,7 @@ fn model_preset_from_api_model(model: ApiModel) -> ModelPreset {
         }
     });
 
-    ModelPreset {
+    let mut preset = ModelPreset {
         id: model.id,
         model: model.model,
         display_name: model.display_name,
@@ -1240,7 +1244,11 @@ fn model_preset_from_api_model(model: ApiModel) -> ModelPreset {
         // `model/list` already returns models filtered for the active client/auth context.
         supported_in_api: true,
         input_modalities: model.input_modalities,
+    };
+    if !ultra_reasoning_enabled {
+        hide_ultra_reasoning_effort(std::slice::from_mut(&mut preset));
     }
+    preset
 }
 
 fn approvals_reviewer_override_from_config(
@@ -1791,6 +1799,68 @@ mod tests {
             plan_type: None,
             rate_limit_reached_type: None,
         }
+    }
+
+    #[test]
+    fn model_preset_filters_ultra_for_tui_when_feature_is_disabled() {
+        let api_model = ApiModel {
+            id: "model-id".to_string(),
+            model: "model-slug".to_string(),
+            upgrade: None,
+            upgrade_info: None,
+            availability_nux: None,
+            display_name: "Model".to_string(),
+            description: "Description".to_string(),
+            hidden: false,
+            supported_reasoning_efforts: vec![
+                codex_app_server_protocol::ReasoningEffortOption {
+                    reasoning_effort: ReasoningEffort::Low,
+                    description: "Low".to_string(),
+                },
+                codex_app_server_protocol::ReasoningEffortOption {
+                    reasoning_effort: ReasoningEffort::Ultra,
+                    description: "Ultra".to_string(),
+                },
+            ],
+            default_reasoning_effort: ReasoningEffort::Ultra,
+            input_modalities: codex_protocol::openai_models::default_input_modalities(),
+            supports_personality: false,
+            additional_speed_tiers: Vec::new(),
+            service_tiers: Vec::new(),
+            default_service_tier: None,
+            is_default: true,
+        };
+        let filtered =
+            model_preset_from_api_model(api_model.clone(), /*ultra_reasoning_enabled*/ false);
+        let unfiltered =
+            model_preset_from_api_model(api_model, /*ultra_reasoning_enabled*/ true);
+
+        assert_eq!(
+            (
+                filtered.default_reasoning_effort,
+                filtered.supported_reasoning_efforts,
+                unfiltered.default_reasoning_effort,
+                unfiltered.supported_reasoning_efforts,
+            ),
+            (
+                ReasoningEffort::Low,
+                vec![ReasoningEffortPreset {
+                    effort: ReasoningEffort::Low,
+                    description: "Low".to_string(),
+                }],
+                ReasoningEffort::Ultra,
+                vec![
+                    ReasoningEffortPreset {
+                        effort: ReasoningEffort::Low,
+                        description: "Low".to_string(),
+                    },
+                    ReasoningEffortPreset {
+                        effort: ReasoningEffort::Ultra,
+                        description: "Ultra".to_string(),
+                    },
+                ],
+            )
+        );
     }
 
     #[test]
