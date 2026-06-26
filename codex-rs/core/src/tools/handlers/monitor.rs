@@ -41,8 +41,19 @@ use std::collections::BTreeMap;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
 use tokio::process::Command;
+use tokio::time::Duration;
+use tokio::time::sleep;
 
 const MONITOR_TOOL_NAME: &str = "monitor";
+
+/// Coalesce a burst of output lines into one notice: flush after this much
+/// quiet, so a chatty command produces one cell + one wake per burst rather
+/// than per line. Also pushes the first delivery past the tool-call reply,
+/// keeping the "started monitor" output ordered before any event.
+const FLUSH_DEBOUNCE: Duration = Duration::from_millis(800);
+
+/// Hard cap so a firehose flushes instead of buffering unboundedly.
+const MAX_BATCH_LINES: usize = 50;
 
 /// Global counter so each monitor (and each of its events) gets a unique id,
 /// without relying on `Math.random`/time which are awkward in this codebase.
@@ -64,10 +75,9 @@ fn create_monitor_tool() -> ToolSpec {
         (
             "command".to_string(),
             JsonSchema::string(Some(
-                "Shell command or script to run in the background. Each stdout line becomes \
-                 an event delivered to you as a new message. Exit ends the watch. Make the \
-                 filter selective (e.g. `tail -f log | grep --line-buffered ERROR`) — every \
-                 line is a separate notification."
+                "Shell command or script to run in the background. stdout lines are batched \
+                 into background notices delivered to you as they arrive. Exit ends the watch. \
+                 Make the filter selective (e.g. `tail -f log | grep --line-buffered ERROR`)."
                     .to_string(),
             )),
         ),
@@ -83,10 +93,12 @@ fn create_monitor_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: MONITOR_TOOL_NAME.to_string(),
         description:
-            "Start a background monitor that streams events from a long-running command. Each \
-             stdout line is delivered to you as a new message (an event) as it arrives — you do \
-             not poll. Use for tailing logs, watching files, or polling loops. Returns \
-             immediately; the watch keeps running across turns until the command exits."
+            "Start a background monitor that streams events from a long-running command. stdout \
+             lines arrive as background notices (you do not poll), batched per burst. \
+             IMPORTANT: these are background signals — do NOT narrate or acknowledge each notice; \
+             stay silent unless an event actually requires you to act, then act. Use for tailing \
+             logs, watching files, or polling loops. Returns immediately; the watch runs across \
+             turns until the command exits."
                 .to_string(),
         strict: false,
         defer_loading: None,
@@ -99,33 +111,39 @@ fn create_monitor_tool() -> ToolSpec {
     })
 }
 
-/// Enqueue one monitor event and wake the session if it is idle.
-async fn deliver_event(session: &Arc<Session>, description: &str, line: String) {
+/// Emit one coalesced batch of monitor lines: a single visible notice cell
+/// plus a single wake of the model. No-op on an empty batch.
+async fn deliver_batch(session: &Arc<Session>, description: &str, lines: Vec<String>) {
+    if lines.is_empty() {
+        return;
+    }
     let sub_id = format!("monitor-{}", MONITOR_SEQ.fetch_add(1, Ordering::Relaxed));
+    let joined = lines.join("\n");
 
-    // 1) Visible, distinct notice in the UI so the user sees what fired.
+    // 1) One visible, distinct notice in the UI for the whole batch.
     session
         .send_event_raw(Event {
             id: sub_id.clone(),
             msg: EventMsg::MonitorEvent(MonitorEventEvent {
                 description: description.to_string(),
-                line: line.clone(),
+                line: joined.clone(),
             }),
         })
         .await;
 
-    // 2) Feed the event to the model and wake the session. This is the inlined
+    // 2) Feed the batch to the model and wake the session. This is the inlined
     // body of `session::handlers::inter_agent_communication` (that handler
     // lives in a private module): queue the event as a mailbox item, then
     // start a turn for it when the session is idle (or let an active turn drain
     // it). The resulting `RawResponseItem` is not rendered by the TUI, so there
-    // is no duplicate of the notice above.
+    // is no duplicate of the notice above. The model is instructed (tool spec)
+    // to handle these silently unless action is required.
     let comm = InterAgentCommunication {
         id: None,
         author: AgentPath::morpheus(),
         recipient: AgentPath::root(),
         other_recipients: Vec::new(),
-        content: format!("[monitor: {description}] {line}"),
+        content: format!("[monitor: {description}] background event(s):\n{joined}"),
         encrypted_content: None,
         internal_chat_message_metadata_passthrough: None,
         trigger_turn: true,
@@ -178,10 +196,10 @@ impl ToolExecutor<ToolInvocation> for MonitorHandler {
                 {
                     Ok(child) => child,
                     Err(err) => {
-                        deliver_event(
+                        deliver_batch(
                             &session_for_task,
                             &description_for_task,
-                            format!("failed to start: {err}"),
+                            vec![format!("failed to start: {err}")],
                         )
                         .await;
                         return;
@@ -189,12 +207,42 @@ impl ToolExecutor<ToolInvocation> for MonitorHandler {
                 };
 
                 if let Some(stdout) = child.stdout.take() {
-                    let mut lines = BufReader::new(stdout).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        if line.trim().is_empty() {
-                            continue;
+                    let mut reader = BufReader::new(stdout).lines();
+                    let mut buf: Vec<String> = Vec::new();
+                    loop {
+                        tokio::select! {
+                            // New output line (or EOF / read error).
+                            line = reader.next_line() => {
+                                match line {
+                                    Ok(Some(l)) => {
+                                        if !l.trim().is_empty() {
+                                            buf.push(l);
+                                            if buf.len() >= MAX_BATCH_LINES {
+                                                deliver_batch(
+                                                    &session_for_task,
+                                                    &description_for_task,
+                                                    std::mem::take(&mut buf),
+                                                )
+                                                .await;
+                                            }
+                                        }
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            // Quiet period elapsed: flush the buffered burst as one notice.
+                            _ = sleep(FLUSH_DEBOUNCE), if !buf.is_empty() => {
+                                deliver_batch(
+                                    &session_for_task,
+                                    &description_for_task,
+                                    std::mem::take(&mut buf),
+                                )
+                                .await;
+                            }
                         }
-                        deliver_event(&session_for_task, &description_for_task, line).await;
+                    }
+                    if !buf.is_empty() {
+                        deliver_batch(&session_for_task, &description_for_task, buf).await;
                     }
                 }
 
@@ -202,14 +250,19 @@ impl ToolExecutor<ToolInvocation> for MonitorHandler {
                     Ok(status) => format!("exited ({status})"),
                     Err(err) => format!("wait error: {err}"),
                 };
-                deliver_event(&session_for_task, &description_for_task, format!("monitor {exit}")).await;
+                deliver_batch(
+                    &session_for_task,
+                    &description_for_task,
+                    vec![format!("monitor {exit}")],
+                )
+                .await;
             });
 
             Ok(boxed_tool_output(FunctionToolOutput::from_text(
                 format!(
-                    "Started background monitor #{monitor_id}: {description}. \
-                     Events will arrive as messages tagged `[monitor: {description}]` \
-                     as the command produces output; a final event is delivered when it exits."
+                    "Started background monitor #{monitor_id}: {description}. Output will arrive \
+                     as quiet `[monitor: {description}]` notices (batched); handle them silently \
+                     unless one needs action. A final notice is delivered when it exits."
                 ),
                 /*success*/ Some(true),
             )))
