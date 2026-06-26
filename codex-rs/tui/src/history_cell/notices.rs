@@ -196,22 +196,33 @@ pub(crate) fn new_monitor_event(description: String, line: String) -> MonitorEve
 
 impl HistoryCell for MonitorEventCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        // A batch may carry several output lines; render them compactly under a
+        // single 📡 header (cyan, so it reads as neither user nor agent speech).
+        let event_lines: Vec<&str> = self.line.split('\n').collect();
         let mut lines: Vec<Line<'static>> = Vec::new();
-        // Distinct system-notice styling: a 📡 badge + cyan label so a monitor
-        // event reads as neither user nor agent speech.
-        let label = format!("📡 monitor[{}] ", self.description);
-        lines.push(vec![label.cyan().bold()].into());
+        let header = if event_lines.len() > 1 {
+            format!("📡 monitor[{}] · {} lines", self.description, event_lines.len())
+        } else {
+            format!("📡 monitor[{}]", self.description)
+        };
+        lines.push(vec![header.cyan().bold()].into());
 
         let wrap_width = width.saturating_sub(4).max(1) as usize;
-        let body = Line::from(self.line.clone());
-        let wrapped = adaptive_wrap_line(&body, RtOptions::new(wrap_width));
-        push_owned_lines(&wrapped, &mut lines);
+        for el in event_lines {
+            let body = Line::from(format!("  {el}"));
+            let wrapped = adaptive_wrap_line(&body, RtOptions::new(wrap_width));
+            push_owned_lines(&wrapped, &mut lines);
+        }
 
         lines
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
-        vec![Line::from(format!("monitor[{}] {}", self.description, self.line))]
+        let mut lines = vec![Line::from(format!("monitor[{}]", self.description))];
+        for el in self.line.split('\n') {
+            lines.push(Line::from(format!("  {el}")));
+        }
+        lines
     }
 }
 
