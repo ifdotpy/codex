@@ -3577,7 +3577,22 @@ impl Config {
         let base_instructions = base_instructions
             .or(file_base_instructions)
             .or(cfg.instructions.clone());
-        let developer_instructions = developer_instructions.or(cfg.developer_instructions);
+        // codex-mon: bake the wait-discipline into the always-on developer instructions so it
+        // ships in every session without a config file or a per-repo AGENTS.md. Appended (not a
+        // base-prompt replacement) so it composes with any user developer_instructions and never
+        // drops the model's default base prompt.
+        const WAIT_DISCIPLINE: &str = "\
+When waiting on long-running work (CI, builds, tests, reviews, PRs): do NOT background a \
+command and then poll it, `wait`, or wrap it in a watchdog, and do NOT emit \"still running\" \
+progress. If you need the result before continuing, run ONE foreground call with an explicit \
+large `timeout_ms` (e.g. 1800000; the built-in kill is 10s, so pass it). To do other work \
+meanwhile, or to wait on several things at once (e.g. multiple PRs), run each in the \
+BACKGROUND — you are woken automatically when it exits, so never poll a backgrounded command. \
+Idle waiting costs nothing; act only on a real completion event.";
+        let developer_instructions = match developer_instructions.or(cfg.developer_instructions) {
+            Some(user) if !user.trim().is_empty() => Some(format!("{user}\n\n{WAIT_DISCIPLINE}")),
+            _ => Some(WAIT_DISCIPLINE.to_string()),
+        };
         let include_permissions_instructions = cfg.include_permissions_instructions.unwrap_or(true);
         let include_apps_instructions = cfg.include_apps_instructions.unwrap_or(true);
         let include_collaboration_mode_instructions =
