@@ -206,44 +206,72 @@ impl ToolExecutor<ToolInvocation> for MonitorHandler {
                     }
                 };
 
+                // Drain BOTH stdout and stderr via forwarder tasks into a
+                // channel. This is what prevents a deadlock: an unread piped
+                // stream fills its OS buffer (~64KB) and blocks the child on
+                // write. Merging stderr also means a command's error output
+                // surfaces as monitor events instead of vanishing.
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
                 if let Some(stdout) = child.stdout.take() {
-                    let mut reader = BufReader::new(stdout).lines();
-                    let mut buf: Vec<String> = Vec::new();
-                    loop {
-                        tokio::select! {
-                            // New output line (or EOF / read error).
-                            line = reader.next_line() => {
-                                match line {
-                                    Ok(Some(l)) => {
-                                        if !l.trim().is_empty() {
-                                            buf.push(l);
-                                            if buf.len() >= MAX_BATCH_LINES {
-                                                deliver_batch(
-                                                    &session_for_task,
-                                                    &description_for_task,
-                                                    std::mem::take(&mut buf),
-                                                )
-                                                .await;
-                                            }
-                                        }
-                                    }
-                                    _ => break,
-                                }
-                            }
-                            // Quiet period elapsed: flush the buffered burst as one notice.
-                            _ = sleep(FLUSH_DEBOUNCE), if !buf.is_empty() => {
-                                deliver_batch(
-                                    &session_for_task,
-                                    &description_for_task,
-                                    std::mem::take(&mut buf),
-                                )
-                                .await;
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        let mut lines = BufReader::new(stdout).lines();
+                        while let Ok(Some(l)) = lines.next_line().await {
+                            if tx.send(l).await.is_err() {
+                                break;
                             }
                         }
+                    });
+                }
+                if let Some(stderr) = child.stderr.take() {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        let mut lines = BufReader::new(stderr).lines();
+                        while let Ok(Some(l)) = lines.next_line().await {
+                            if tx.send(l).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+                // Drop our own sender so `rx` closes once both readers finish.
+                drop(tx);
+
+                let mut buf: Vec<String> = Vec::new();
+                loop {
+                    tokio::select! {
+                        // Next line from either stream (None once both are done).
+                        maybe_line = rx.recv() => {
+                            match maybe_line {
+                                Some(l) => {
+                                    if !l.trim().is_empty() {
+                                        buf.push(l);
+                                        if buf.len() >= MAX_BATCH_LINES {
+                                            deliver_batch(
+                                                &session_for_task,
+                                                &description_for_task,
+                                                std::mem::take(&mut buf),
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                        // Quiet period elapsed: flush the buffered burst as one notice.
+                        _ = sleep(FLUSH_DEBOUNCE), if !buf.is_empty() => {
+                            deliver_batch(
+                                &session_for_task,
+                                &description_for_task,
+                                std::mem::take(&mut buf),
+                            )
+                            .await;
+                        }
                     }
-                    if !buf.is_empty() {
-                        deliver_batch(&session_for_task, &description_for_task, buf).await;
-                    }
+                }
+                if !buf.is_empty() {
+                    deliver_batch(&session_for_task, &description_for_task, buf).await;
                 }
 
                 let exit = match child.wait().await {
