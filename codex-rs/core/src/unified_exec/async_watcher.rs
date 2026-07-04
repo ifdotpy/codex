@@ -1,5 +1,8 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use tokio::sync::Mutex;
 use tokio::time::Duration;
@@ -11,6 +14,8 @@ use super::process::UnifiedExecProcess;
 use crate::exec::MAX_EXEC_OUTPUT_DELTAS_PER_CALL;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
+use codex_protocol::AgentPath;
+use codex_protocol::protocol::InterAgentCommunication;
 use crate::tools::events::ToolEmitter;
 use crate::tools::events::ToolEventCtx;
 use crate::tools::events::ToolEventFailure;
@@ -101,6 +106,38 @@ pub(crate) fn start_streaming_output(
     });
 }
 
+static BG_WAKE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Wake the session once when a backgrounded (unified-exec) process exits, so
+/// the agent learns the outcome without polling the background terminal.
+///
+/// Reuses the mailbox + pending-work path, which is idle-gated: it only starts
+/// a fresh turn when the session is idle (a truly backgrounded command). If a
+/// turn is active — e.g. a short command the model is still reading — the item
+/// simply drains into that turn, so this never spawns a spurious turn or
+/// interrupts ongoing work.
+async fn wake_session_on_background_exit(session: &Arc<Session>, command: &str, outcome: &str) {
+    let comm = InterAgentCommunication {
+        id: None,
+        author: AgentPath::morpheus(),
+        recipient: AgentPath::root(),
+        other_recipients: Vec::new(),
+        content: format!(
+            "Background command finished — `{command}` {outcome}. Its output is in the exec \
+             results; act on it if needed, otherwise continue. You were woken on exit, so do \
+             not poll background commands."
+        ),
+        encrypted_content: None,
+        internal_chat_message_metadata_passthrough: None,
+        trigger_turn: true,
+    };
+    let sub_id = format!("bg-exit-{}", BG_WAKE_SEQ.fetch_add(1, Ordering::Relaxed));
+    session.input_queue.enqueue_mailbox_communication(comm).await;
+    session
+        .maybe_start_turn_for_pending_work_with_sub_id(sub_id)
+        .await;
+}
+
 /// Spawn a background watcher that waits for the PTY to exit and then emits a
 /// single ExecCommandEnd event with the aggregated transcript.
 #[allow(clippy::too_many_arguments)]
@@ -114,6 +151,12 @@ pub(crate) fn spawn_exit_watcher(
     process_id: i32,
     transcript: Arc<Mutex<HeadTailBuffer>>,
     started_at: Instant,
+    // Set true (once) only when the initiating exec_command call reported this
+    // process as still running — i.e. the model was told it is backgrounded.
+    // We wake the model on exit only in that case; a command that completed
+    // within its initial call already delivered its output there and must not
+    // wake (waking it would spuriously start a turn and can cascade).
+    wake_on_exit: Arc<AtomicBool>,
 ) {
     let exit_token = process.cancellation_token();
     let output_drained = process.output_drained_notify();
@@ -123,7 +166,11 @@ pub(crate) fn spawn_exit_watcher(
         output_drained.notified().await;
 
         let duration = Instant::now().saturating_duration_since(started_at);
-        if let Some(message) = process.failure_message() {
+        // The emit_* calls consume `session_ref` and `command`; keep a handle
+        // and display string for the completion wake below.
+        let session_for_wake = Arc::clone(&session_ref);
+        let command_display = command.join(" ");
+        let outcome = if let Some(message) = process.failure_message() {
             emit_failed_exec_end_for_unified_exec(
                 session_ref,
                 turn_ref,
@@ -137,6 +184,7 @@ pub(crate) fn spawn_exit_watcher(
                 duration,
             )
             .await;
+            "failed".to_string()
         } else {
             let exit_code = process.exit_code().unwrap_or(-1);
             emit_exec_end_for_unified_exec(
@@ -152,6 +200,15 @@ pub(crate) fn spawn_exit_watcher(
                 duration,
             )
             .await;
+            format!("exited (code {exit_code})")
+        };
+
+        // Push a single completion wake so the agent reacts on exit instead of
+        // polling the background terminal — but only for a genuinely backgrounded
+        // process (the initial call already returned). Short synchronous commands
+        // deliver their output through the initiating call and must not wake.
+        if wake_on_exit.load(Ordering::Acquire) {
+            wake_session_on_background_exit(&session_for_wake, &command_display, &outcome).await;
         }
     });
 }
