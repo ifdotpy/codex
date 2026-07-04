@@ -435,6 +435,11 @@ impl UnifiedExecProcessManager {
         // Persist live sessions before the initial yield wait so interrupting the
         // turn cannot drop the last Arc and terminate the background process.
         let process_started_alive = !process.has_exited() && process.exit_code().is_none();
+        // Set true (once) below iff we report this process to the model as still
+        // running. The exit watcher wakes the model only when this is set, so a
+        // backgrounded command's completion is surfaced while a command that
+        // finished within this call (its output already returned here) is not.
+        let wake_on_exit = Arc::new(AtomicBool::new(false));
         let _initial_exec_command_guard = if process_started_alive {
             let initial_exec_command_active = Arc::new(AtomicBool::new(true));
             self.store_process(
@@ -449,6 +454,7 @@ impl UnifiedExecProcessManager {
                 deferred_network_approval.clone(),
                 Arc::clone(&transcript),
                 Arc::clone(&initial_exec_command_active),
+                Arc::clone(&wake_on_exit),
             )
             .await;
             Some(InitialExecCommandGuard {
@@ -541,7 +547,11 @@ impl UnifiedExecProcessManager {
                     exit_code,
                     process_id,
                     ..
-                } => (Some(process_id), exit_code),
+                } => {
+                    // Reported to the model as still running → wake it on exit.
+                    wake_on_exit.store(true, Ordering::Release);
+                    (Some(process_id), exit_code)
+                }
                 ProcessStatus::Exited { exit_code, entry } => {
                     if let Err(message) =
                         finish_deferred_network_approval_after_process_exit_for_session(
@@ -856,6 +866,7 @@ impl UnifiedExecProcessManager {
         network_approval: Option<DeferredNetworkApproval>,
         transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
         initial_exec_command_active: Arc<AtomicBool>,
+        wake_on_exit: Arc<AtomicBool>,
     ) {
         let entry = ProcessEntry {
             process: Arc::clone(&process),
@@ -892,6 +903,7 @@ impl UnifiedExecProcessManager {
             process_id,
             transcript,
             started_at,
+            wake_on_exit,
         );
     }
 
