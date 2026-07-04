@@ -139,7 +139,6 @@ async fn deliver_batch(session: &Arc<Session>, description: &str, lines: Vec<Str
     // is no duplicate of the notice above. The model is instructed (tool spec)
     // to handle these silently unless action is required.
     let comm = InterAgentCommunication {
-        id: None,
         author: AgentPath::morpheus(),
         recipient: AgentPath::root(),
         other_recipients: Vec::new(),

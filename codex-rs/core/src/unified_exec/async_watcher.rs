@@ -118,7 +118,6 @@ static BG_WAKE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// interrupts ongoing work.
 async fn wake_session_on_background_exit(session: &Arc<Session>, command: &str, outcome: &str) {
     let comm = InterAgentCommunication {
-        id: None,
         author: AgentPath::morpheus(),
         recipient: AgentPath::root(),
         other_recipients: Vec::new(),
