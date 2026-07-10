@@ -17,6 +17,7 @@ use crate::tools::handlers::ListAvailablePluginsToInstallHandler;
 use crate::tools::handlers::ListMcpResourceTemplatesHandler;
 use crate::tools::handlers::ListMcpResourcesHandler;
 use crate::tools::handlers::McpHandler;
+use crate::tools::handlers::MonitorHandler;
 use crate::tools::handlers::NewContextWindowHandler;
 use crate::tools::handlers::PlanHandler;
 use crate::tools::handlers::ReadMcpResourceHandler;
@@ -653,7 +654,7 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut Planne
 
     match shell_type_for_model_and_features(&turn_context.model_info, features) {
         ConfigShellToolType::UnifiedExec => {
-            planned_tools.add(ExecCommandHandler::new(ExecCommandHandlerOptions {
+            let exec_command_options = ExecCommandHandlerOptions {
                 allow_login_shell,
                 exec_permission_approvals_enabled,
                 include_environment_id,
@@ -661,7 +662,11 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut Planne
                     turn_context,
                     context.step_context,
                 ),
-            }));
+            };
+            planned_tools.add(ExecCommandHandler::new(exec_command_options));
+            if monitor_tool_enabled_for_turn(turn_context, features) {
+                planned_tools.add(MonitorHandler::new(exec_command_options));
+            }
             planned_tools.add(WriteStdinHandler);
 
             // Keep the legacy shell tool registered while unified exec is
@@ -675,6 +680,21 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut Planne
             planned_tools.add(ShellCommandHandler::new(shell_command_options));
         }
     }
+}
+
+fn monitor_tool_enabled_for_turn(
+    turn_context: &TurnContext,
+    features: &codex_features::Features,
+) -> bool {
+    features.enabled(Feature::MonitorTool)
+        && match &turn_context.session_source {
+            SessionSource::Cli | SessionSource::VSCode | SessionSource::Custom(_) => true,
+            SessionSource::Exec
+            | SessionSource::Mcp
+            | SessionSource::Internal(_)
+            | SessionSource::SubAgent(_)
+            | SessionSource::Unknown => false,
+        }
 }
 
 fn unified_exec_should_include_shell_parameter(
