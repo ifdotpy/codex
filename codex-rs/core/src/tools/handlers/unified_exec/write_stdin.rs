@@ -23,10 +23,22 @@ struct WriteStdinArgs {
     session_id: i32,
     #[serde(default)]
     chars: String,
-    #[serde(default = "super::default_write_stdin_yield_time_ms")]
-    yield_time_ms: u64,
+    #[serde(default)]
+    yield_time_ms: Option<u64>,
     #[serde(default)]
     max_output_tokens: Option<usize>,
+}
+
+fn resolve_yield_time_ms(args: &WriteStdinArgs) -> u64 {
+    args.yield_time_ms.unwrap_or_else(|| {
+        if args.chars.is_empty() {
+            // Empty stdin is an await, not an interaction. Let the process
+            // manager clamp to the configured background terminal maximum.
+            u64::MAX
+        } else {
+            super::default_write_stdin_yield_time_ms()
+        }
+    })
 }
 
 pub struct WriteStdinHandler;
@@ -67,13 +79,14 @@ impl WriteStdinHandler {
         };
 
         let args: WriteStdinArgs = parse_arguments(&arguments)?;
+        let yield_time_ms = resolve_yield_time_ms(&args);
         let response = session
             .services
             .unified_exec_manager
             .write_stdin(WriteStdinRequest {
                 process_id: args.session_id,
                 input: &args.chars,
-                yield_time_ms: args.yield_time_ms,
+                yield_time_ms,
                 max_output_tokens: args.max_output_tokens,
                 truncation_policy: turn.model_info.truncation_policy.into(),
             })
@@ -101,6 +114,10 @@ impl WriteStdinHandler {
         Ok(boxed_tool_output(response))
     }
 }
+
+#[cfg(test)]
+#[path = "write_stdin_tests.rs"]
+mod tests;
 
 impl CoreToolRuntime for WriteStdinHandler {
     fn matches_kind(&self, payload: &ToolPayload) -> bool {

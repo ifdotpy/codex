@@ -2790,7 +2790,7 @@ PY
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unified_exec_timeout_and_followup_poll() -> Result<()> {
+async fn empty_write_stdin_defaults_to_background_timeout() -> Result<()> {
     // TODO(anp): Remove after unified-exec fixtures use target-native commands.
     skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
     skip_if_no_network!(Ok(()));
@@ -2799,6 +2799,7 @@ async fn unified_exec_timeout_and_followup_poll() -> Result<()> {
     let server = start_mock_server().await;
 
     let mut builder = test_codex().with_config(|config| {
+        config.background_terminal_max_timeout = 5_000;
         config
             .features
             .enable(Feature::UnifiedExec)
@@ -2808,7 +2809,7 @@ async fn unified_exec_timeout_and_followup_poll() -> Result<()> {
 
     let first_call_id = "uexec-timeout";
     let first_args = serde_json::json!({
-        "cmd": "sleep 0.5; echo ready",
+        "cmd": "sleep 10; echo ready",
         "yield_time_ms": 10,
     });
 
@@ -2816,7 +2817,6 @@ async fn unified_exec_timeout_and_followup_poll() -> Result<()> {
     let second_args = serde_json::json!({
         "chars": "",
         "session_id": 1000,
-        "yield_time_ms": 800,
     });
 
     let responses = vec![
@@ -2868,11 +2868,13 @@ async fn unified_exec_timeout_and_followup_poll() -> Result<()> {
     assert!(first_output.output.is_empty());
 
     let poll_output = outputs.get(second_call_id).expect("missing poll output");
-    let output_text = poll_output.output.as_str();
+    assert!(poll_output.process_id.is_some());
     assert!(
-        output_text.contains("ready"),
-        "expected ready output, got {output_text:?}"
+        (4.5..6.0).contains(&poll_output.wall_time_seconds),
+        "expected default poll to use the five-second background timeout, got {}",
+        poll_output.wall_time_seconds
     );
+    assert!(!poll_output.output.contains("ready"));
 
     Ok(())
 }
