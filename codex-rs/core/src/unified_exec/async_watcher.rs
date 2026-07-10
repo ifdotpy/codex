@@ -1,13 +1,20 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio::time::Sleep;
 
 use super::UnifiedExecContext;
+use super::monitor::enqueue_background_notification;
 use super::process::UnifiedExecProcess;
+use crate::context::BackgroundTerminalNotification;
 use crate::exec::MAX_EXEC_OUTPUT_DELTAS_PER_CALL;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -101,6 +108,56 @@ pub(crate) fn start_streaming_output(
     });
 }
 
+const EXIT_WAKE_PENDING: u8 = 0;
+const EXIT_WAKE_ENABLED: u8 = 1;
+const EXIT_WAKE_DISABLED: u8 = 2;
+
+pub(crate) struct ExitWakeDecision {
+    state: AtomicU8,
+    notify: Notify,
+}
+
+impl ExitWakeDecision {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: AtomicU8::new(EXIT_WAKE_PENDING),
+            notify: Notify::new(),
+        }
+    }
+
+    pub(crate) fn decide(&self, enabled: bool) {
+        let state = if enabled {
+            EXIT_WAKE_ENABLED
+        } else {
+            EXIT_WAKE_DISABLED
+        };
+        if self
+            .state
+            .compare_exchange(
+                EXIT_WAKE_PENDING,
+                state,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.notify.notify_waiters();
+        }
+    }
+
+    async fn enabled(&self) -> bool {
+        loop {
+            let notified = self.notify.notified();
+            match self.state.load(Ordering::Acquire) {
+                EXIT_WAKE_ENABLED => return true,
+                EXIT_WAKE_DISABLED => return false,
+                EXIT_WAKE_PENDING => notified.await,
+                _ => unreachable!("invalid exit wake decision"),
+            }
+        }
+    }
+}
+
 /// Spawn a background watcher that waits for the PTY to exit and then emits a
 /// single ExecCommandEnd event with the aggregated transcript.
 #[allow(clippy::too_many_arguments)]
@@ -114,6 +171,10 @@ pub(crate) fn spawn_exit_watcher(
     process_id: i32,
     transcript: Arc<Mutex<HeadTailBuffer>>,
     started_at: Instant,
+    description: Option<String>,
+    mut monitor_completed: Option<watch::Receiver<bool>>,
+    explicit_waiters: Arc<AtomicUsize>,
+    wake_on_exit: Arc<ExitWakeDecision>,
 ) {
     let exit_token = process.cancellation_token();
     let output_drained = process.output_drained_notify();
@@ -121,9 +182,16 @@ pub(crate) fn spawn_exit_watcher(
     tokio::spawn(async move {
         exit_token.cancelled().await;
         output_drained.notified().await;
+        if let Some(completed) = monitor_completed.as_mut() {
+            let _ = completed.wait_for(|completed| *completed).await;
+        }
 
         let duration = Instant::now().saturating_duration_since(started_at);
-        if let Some(message) = process.failure_message() {
+        let session_for_wake = Arc::clone(&session_ref);
+        let description = description.unwrap_or_else(|| command.join(" "));
+        let notification = if let Some(message) = process.failure_message() {
+            let notification =
+                BackgroundTerminalNotification::failed(process_id, &description, &message);
             emit_failed_exec_end_for_unified_exec(
                 session_ref,
                 turn_ref,
@@ -137,8 +205,11 @@ pub(crate) fn spawn_exit_watcher(
                 duration,
             )
             .await;
+            notification
         } else {
-            let exit_code = process.exit_code().unwrap_or(-1);
+            let exit_code = process.exit_code();
+            let notification =
+                BackgroundTerminalNotification::exited(process_id, &description, exit_code);
             emit_exec_end_for_unified_exec(
                 session_ref,
                 turn_ref,
@@ -148,10 +219,15 @@ pub(crate) fn spawn_exit_watcher(
                 Some(process_id.to_string()),
                 transcript,
                 String::new(),
-                exit_code,
+                exit_code.unwrap_or(-1),
                 duration,
             )
             .await;
+            notification
+        };
+
+        if wake_on_exit.enabled().await && explicit_waiters.load(Ordering::Acquire) == 0 {
+            enqueue_background_notification(&session_for_wake, notification).await;
         }
     });
 }

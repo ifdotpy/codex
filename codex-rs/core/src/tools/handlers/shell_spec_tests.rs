@@ -130,7 +130,7 @@ fn write_stdin_tool_matches_expected_spec() {
         (
             "yield_time_ms".to_string(),
             JsonSchema::number(Some(
-                "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.".to_string(),
+                "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms. Empty polls default to the configured background terminal timeout; set this only for explicit short status checks.".to_string(),
             )),
         ),
         (
@@ -146,7 +146,7 @@ fn write_stdin_tool_matches_expected_spec() {
         ToolSpec::Function(ResponsesApiTool {
             name: "write_stdin".to_string(),
             description:
-                "Writes characters to an existing unified exec session and returns recent output."
+                "Writes characters to an existing unified exec session and returns recent output. For empty polls, prefer one long wait to repeated status checks."
                     .to_string(),
             strict: false,
             defer_loading: None,

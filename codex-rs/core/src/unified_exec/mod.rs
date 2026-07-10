@@ -26,6 +26,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Weak;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::models::AdditionalPermissionProfile;
@@ -46,6 +48,7 @@ use crate::tools::network_approval::DeferredNetworkApproval;
 mod async_watcher;
 mod errors;
 mod head_tail_buffer;
+mod monitor;
 mod process;
 mod process_manager;
 mod process_state;
@@ -71,6 +74,12 @@ pub(crate) const DEFAULT_MAX_OUTPUT_TOKENS: usize = 10_000;
 pub(crate) const UNIFIED_EXEC_OUTPUT_MAX_BYTES: usize = 1024 * 1024; // 1 MiB
 pub(crate) const UNIFIED_EXEC_OUTPUT_MAX_TOKENS: usize = UNIFIED_EXEC_OUTPUT_MAX_BYTES / 4;
 pub(crate) const MAX_UNIFIED_EXEC_PROCESSES: usize = 64;
+
+#[derive(Clone, Debug)]
+pub(crate) struct MonitorConfig {
+    pub(crate) description: String,
+    pub(crate) timeout: Option<std::time::Duration>,
+}
 
 pub(crate) struct UnifiedExecContext {
     pub session: Arc<Session>,
@@ -107,6 +116,7 @@ pub(crate) struct ExecCommandRequest {
     pub additional_permissions_preapproved: bool,
     pub justification: Option<String>,
     pub prefix_rule: Option<Vec<String>>,
+    pub monitor_config: Option<MonitorConfig>,
 }
 
 #[derive(Debug)]
@@ -152,12 +162,30 @@ impl Default for UnifiedExecProcessManager {
     }
 }
 
+pub(crate) struct ExplicitWaitGuard {
+    waiters: Arc<AtomicUsize>,
+}
+
+impl ExplicitWaitGuard {
+    pub(crate) fn new(waiters: Arc<AtomicUsize>) -> Self {
+        waiters.fetch_add(1, Ordering::AcqRel);
+        Self { waiters }
+    }
+}
+
+impl Drop for ExplicitWaitGuard {
+    fn drop(&mut self) {
+        self.waiters.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 struct ProcessEntry {
     process: Arc<UnifiedExecProcess>,
     call_id: String,
     process_id: i32,
     cwd: PathUri,
     initial_exec_command_active: Arc<std::sync::atomic::AtomicBool>,
+    explicit_waiters: Arc<AtomicUsize>,
     hook_command: String,
     tty: bool,
     network_approval: Option<DeferredNetworkApproval>,
