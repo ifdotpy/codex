@@ -793,7 +793,7 @@ impl Session {
                 false
             }
         };
-        if cleared_active_turn {
+        if cleared_active_turn && self.pending_work_wake_tx.send(()).is_err() {
             self.emit_thread_idle_lifecycle_if_idle().await;
         }
         // Regular items were flushed before this terminal event was appended; buffering

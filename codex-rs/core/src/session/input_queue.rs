@@ -9,6 +9,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 
+const MAX_BACKGROUND_CONTEXT_ITEMS: usize = 64;
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TurnInput {
     UserInput {
@@ -34,7 +36,7 @@ pub(crate) struct TurnInputQueue {
 /// Session-scoped pending input storage and active-turn mailbox delivery coordination.
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
-    mailbox_pending_mails: Mutex<VecDeque<InterAgentCommunication>>,
+    mailbox_pending_items: Mutex<VecDeque<TurnInput>>,
 }
 
 impl InputQueue {
@@ -42,7 +44,7 @@ impl InputQueue {
         let (activity_tx, _) = watch::channel(InputQueueActivity::Mailbox);
         Self {
             activity_tx,
-            mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            mailbox_pending_items: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -73,32 +75,64 @@ impl InputQueue {
         &self,
         communication: InterAgentCommunication,
     ) {
-        self.mailbox_pending_mails
+        self.mailbox_pending_items
             .lock()
             .await
-            .push_back(communication);
+            .push_back(TurnInput::InterAgentCommunication(communication));
+        self.activity_tx.send_replace(InputQueueActivity::Mailbox);
+    }
+
+    pub(crate) async fn enqueue_background_context(
+        &self,
+        active_turn: &Mutex<Option<ActiveTurn>>,
+        item: ResponseItem,
+    ) {
+        let turn_state = active_turn
+            .lock()
+            .await
+            .as_ref()
+            .map(|active_turn| Arc::clone(&active_turn.turn_state));
+        if let Some(turn_state) = turn_state {
+            let mut turn_state = turn_state.lock().await;
+            if turn_state.pending_input.items.is_empty() {
+                turn_state.set_mailbox_delivery_phase(MailboxDeliveryPhase::NextTurn);
+            }
+        }
+        let mut items = self.mailbox_pending_items.lock().await;
+        let background_count = items
+            .iter()
+            .filter(|item| matches!(item, TurnInput::ResponseItem(_)))
+            .count();
+        if background_count == MAX_BACKGROUND_CONTEXT_ITEMS
+            && let Some(oldest) = items
+                .iter()
+                .position(|item| matches!(item, TurnInput::ResponseItem(_)))
+        {
+            items.remove(oldest);
+        }
+        items.push_back(TurnInput::ResponseItem(item));
+        drop(items);
         self.activity_tx.send_replace(InputQueueActivity::Mailbox);
     }
 
     pub(crate) async fn has_pending_mailbox_items(&self) -> bool {
-        !self.mailbox_pending_mails.lock().await.is_empty()
+        !self.mailbox_pending_items.lock().await.is_empty()
     }
 
     pub(crate) async fn has_trigger_turn_mailbox_items(&self) -> bool {
-        self.mailbox_pending_mails
+        self.mailbox_pending_items
             .lock()
             .await
             .iter()
-            .any(|mail| mail.trigger_turn)
+            .any(|item| match item {
+                TurnInput::ResponseItem(_) => true,
+                TurnInput::InterAgentCommunication(mail) => mail.trigger_turn,
+                TurnInput::UserInput { .. } => false,
+            })
     }
 
     pub(crate) async fn drain_mailbox_input_items(&self) -> Vec<TurnInput> {
-        self.mailbox_pending_mails
-            .lock()
-            .await
-            .drain(..)
-            .map(TurnInput::InterAgentCommunication)
-            .collect()
+        self.mailbox_pending_items.lock().await.drain(..).collect()
     }
 
     pub(crate) async fn turn_state_for_sub_id(
@@ -264,6 +298,7 @@ impl TurnInputQueue {
 mod tests {
     use super::*;
     use codex_protocol::AgentPath;
+    use codex_protocol::models::ContentItem;
     use pretty_assertions::assert_eq;
 
     fn make_mail(
@@ -279,6 +314,16 @@ mod tests {
             content.to_string(),
             trigger_turn,
         )
+    }
+
+    fn make_context_item(text: impl Into<String>) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText { text: text.into() }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
     }
 
     #[tokio::test]
@@ -416,5 +461,37 @@ mod tests {
             ))
             .await;
         assert!(input_queue.has_trigger_turn_mailbox_items().await);
+    }
+
+    #[tokio::test]
+    async fn background_context_is_bounded_without_dropping_mail() {
+        let input_queue = InputQueue::new();
+        let active_turn = Mutex::new(None);
+        let mail = make_mail(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            "mail",
+            /*trigger_turn*/ false,
+        );
+        input_queue
+            .enqueue_mailbox_communication(mail.clone())
+            .await;
+        for index in 0..=MAX_BACKGROUND_CONTEXT_ITEMS {
+            input_queue
+                .enqueue_background_context(&active_turn, make_context_item(index.to_string()))
+                .await;
+        }
+
+        assert!(input_queue.has_trigger_turn_mailbox_items().await);
+        let items = input_queue.drain_mailbox_input_items().await;
+        assert_eq!(items.len(), MAX_BACKGROUND_CONTEXT_ITEMS + 1);
+        assert_eq!(items[0], TurnInput::InterAgentCommunication(mail));
+        assert_eq!(items[1], TurnInput::ResponseItem(make_context_item("1")));
+        assert_eq!(
+            items.last(),
+            Some(&TurnInput::ResponseItem(make_context_item(
+                MAX_BACKGROUND_CONTEXT_ITEMS.to_string()
+            )))
+        );
     }
 }

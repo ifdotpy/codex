@@ -42,6 +42,7 @@ pub(crate) struct Session {
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) input_queue: InputQueue,
+    pub(crate) pending_work_wake_tx: tokio::sync::mpsc::UnboundedSender<()>,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
     pub(super) next_internal_sub_id: AtomicU64,
@@ -1140,6 +1141,8 @@ impl Session {
                 tool_search_handler_cache: Default::default(),
                 turn_environments: Arc::clone(&turn_environments),
             };
+            let (pending_work_wake_tx, mut pending_work_wake_rx) =
+                tokio::sync::mpsc::unbounded_channel();
             let sess = Arc::new(Session {
                 thread_id,
                 installation_id,
@@ -1153,9 +1156,20 @@ impl Session {
                 conversation: Arc::new(RealtimeConversationManager::new()),
                 active_turn: Mutex::new(None),
                 input_queue: InputQueue::new(),
+                pending_work_wake_tx,
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
                 next_internal_sub_id: AtomicU64::new(0),
+            });
+            let weak_session = Arc::downgrade(&sess);
+            tokio::spawn(async move {
+                while pending_work_wake_rx.recv().await.is_some() {
+                    let Some(session) = weak_session.upgrade() else {
+                        break;
+                    };
+                    session.maybe_start_turn_for_pending_work().await;
+                    session.emit_thread_idle_lifecycle_if_idle().await;
+                }
             });
             if let Some(network_policy_decider_session) = network_policy_decider_session {
                 let mut guard = network_policy_decider_session.write().await;
