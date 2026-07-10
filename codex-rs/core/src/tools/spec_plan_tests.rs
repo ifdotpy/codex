@@ -494,6 +494,93 @@ async fn shell_family_registers_visible_unified_exec_and_hidden_legacy_shell() {
 }
 
 #[tokio::test]
+async fn monitor_tool_requires_monitor_feature_and_unified_exec() {
+    let default_plan = probe(|turn| {
+        set_features(turn, &[Feature::ShellTool, Feature::UnifiedExec]);
+        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
+        turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
+        turn.session_source = SessionSource::Cli;
+    })
+    .await;
+    default_plan.assert_visible_lacks(&["monitor"]);
+    default_plan.assert_registered_lacks(&["monitor"]);
+
+    let explicitly_disabled = probe(|turn| {
+        set_features(turn, &[Feature::ShellTool, Feature::UnifiedExec]);
+        set_feature(turn, Feature::MonitorTool, /*enabled*/ false);
+        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
+        turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
+        turn.session_source = SessionSource::Cli;
+    })
+    .await;
+    explicitly_disabled.assert_visible_lacks(&["monitor"]);
+    explicitly_disabled.assert_registered_lacks(&["monitor"]);
+
+    let enabled = probe(|turn| {
+        set_features(
+            turn,
+            &[
+                Feature::ShellTool,
+                Feature::UnifiedExec,
+                Feature::MonitorTool,
+            ],
+        );
+        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
+        turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
+        turn.session_source = SessionSource::Cli;
+    })
+    .await;
+    enabled.assert_visible_contains(&["exec_command", "monitor", "write_stdin"]);
+    enabled.assert_registered_contains(&["monitor"]);
+
+    let subagent = probe(|turn| {
+        set_features(
+            turn,
+            &[
+                Feature::ShellTool,
+                Feature::UnifiedExec,
+                Feature::MonitorTool,
+            ],
+        );
+        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
+        turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
+        turn.session_source = SessionSource::SubAgent(SubAgentSource::Other("worker".to_string()));
+    })
+    .await;
+    subagent.assert_visible_lacks(&["monitor"]);
+    subagent.assert_registered_lacks(&["monitor"]);
+
+    for session_source in [SessionSource::Exec, SessionSource::Mcp] {
+        let one_shot = probe(|turn| {
+            set_features(
+                turn,
+                &[
+                    Feature::ShellTool,
+                    Feature::UnifiedExec,
+                    Feature::MonitorTool,
+                ],
+            );
+            set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
+            turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
+            turn.session_source = session_source;
+        })
+        .await;
+        one_shot.assert_visible_lacks(&["monitor"]);
+        one_shot.assert_registered_lacks(&["monitor"]);
+    }
+
+    let legacy_shell = probe(|turn| {
+        set_features(turn, &[Feature::ShellTool, Feature::MonitorTool]);
+        set_feature(turn, Feature::UnifiedExec, /*enabled*/ false);
+        turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
+        turn.session_source = SessionSource::Cli;
+    })
+    .await;
+    legacy_shell.assert_visible_lacks(&["monitor"]);
+    legacy_shell.assert_registered_lacks(&["monitor"]);
+}
+
+#[tokio::test]
 async fn shell_zsh_fork_stays_standalone_until_unified_exec_composition_is_enabled() {
     let standalone = probe(|turn| {
         set_features(turn, &[Feature::ShellTool, Feature::UnifiedExec]);
