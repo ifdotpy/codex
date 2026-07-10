@@ -502,8 +502,8 @@ async fn monitor_tool_requires_monitor_feature_and_unified_exec() {
         turn.session_source = SessionSource::Cli;
     })
     .await;
-    default_plan.assert_visible_lacks(&["monitor"]);
-    default_plan.assert_registered_lacks(&["monitor"]);
+    default_plan.assert_visible_contains(&["monitor"]);
+    default_plan.assert_registered_contains(&["monitor"]);
 
     let explicitly_disabled = probe(|turn| {
         set_features(turn, &[Feature::ShellTool, Feature::UnifiedExec]);

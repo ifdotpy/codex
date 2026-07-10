@@ -134,6 +134,12 @@ fn code_mode_host_is_stable_and_enabled_by_default() {
 }
 
 #[test]
+fn monitor_tool_is_stable_and_enabled_by_default() {
+    assert_eq!(Feature::MonitorTool.stage(), Stage::Stable);
+    assert_eq!(Feature::MonitorTool.default_enabled(), true);
+}
+
+#[test]
 fn guardian_approval_is_stable_and_enabled_by_default() {
     let spec = Feature::GuardianApproval.info();
 
