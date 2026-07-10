@@ -930,3 +930,17 @@ async fn remote_exec_server_rejects_inherited_fd_launches() -> anyhow::Result<()
     );
     Ok(())
 }
+
+#[test]
+fn explicit_wait_guard_counts_parallel_waiters() {
+    let waiters = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = ExplicitWaitGuard::new(Arc::clone(&waiters));
+    assert_eq!(waiters.load(std::sync::atomic::Ordering::Acquire), 1);
+    {
+        let _second = ExplicitWaitGuard::new(Arc::clone(&waiters));
+        assert_eq!(waiters.load(std::sync::atomic::Ordering::Acquire), 2);
+    }
+    assert_eq!(waiters.load(std::sync::atomic::Ordering::Acquire), 1);
+    drop(first);
+    assert_eq!(waiters.load(std::sync::atomic::Ordering::Acquire), 0);
+}
