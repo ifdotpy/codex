@@ -282,3 +282,7 @@ pub(super) async fn enqueue_background_notification(
         .await;
     session.maybe_start_turn_for_pending_work().await;
 }
+
+#[cfg(test)]
+#[path = "monitor_tests.rs"]
+mod tests;
