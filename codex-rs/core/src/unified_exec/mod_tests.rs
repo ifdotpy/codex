@@ -133,6 +133,7 @@ async fn exec_command_with_tty(
             process_id,
             cwd: cwd.clone().into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            explicit_waiters: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             hook_command: cmd.to_string(),
             tty,
             network_approval: None,
@@ -676,6 +677,7 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
             process_id,
             cwd: cwd.into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            explicit_waiters: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             hook_command: "sleep 60".to_string(),
             tty: true,
             network_approval: None,
@@ -749,6 +751,7 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
             process_id,
             cwd: cwd.into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            explicit_waiters: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             hook_command: "sleep 60".to_string(),
             tty: true,
             network_approval: None,
@@ -926,4 +929,17 @@ async fn remote_exec_server_rejects_inherited_fd_launches() -> anyhow::Result<()
         "Failed to create unified exec process: remote exec-server does not support inherited file descriptors"
     );
     Ok(())
+}
+#[test]
+fn explicit_wait_guard_counts_parallel_waiters() {
+    let waiters = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let first = ExplicitWaitGuard::new(Arc::clone(&waiters));
+    assert_eq!(waiters.load(std::sync::atomic::Ordering::Acquire), 1);
+    {
+        let _second = ExplicitWaitGuard::new(Arc::clone(&waiters));
+        assert_eq!(waiters.load(std::sync::atomic::Ordering::Acquire), 2);
+    }
+    assert_eq!(waiters.load(std::sync::atomic::Ordering::Acquire), 1);
+    drop(first);
+    assert_eq!(waiters.load(std::sync::atomic::Ordering::Acquire), 0);
 }
