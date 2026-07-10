@@ -85,16 +85,14 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
         options.exec_permission_approvals_enabled,
     ));
 
+    let description = "Runs a command in a PTY, returning output or a session ID for ongoing interaction. If a command is still running when the call returns, Codex wakes you when it exits, so do not poll only to learn completion.";
+
     ToolSpec::Function(ResponsesApiTool {
         name: "exec_command".to_string(),
         description: if cfg!(windows) {
-            format!(
-                "Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n{}",
-                windows_shell_guidance()
-            )
+            format!("{description}\n\n{}", windows_shell_guidance())
         } else {
-            "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
-                .to_string()
+            description.to_string()
         },
         strict: false,
         defer_loading: None,
@@ -124,7 +122,7 @@ pub fn create_write_stdin_tool() -> ToolSpec {
         (
             "yield_time_ms".to_string(),
             JsonSchema::number(Some(
-                "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms; empty polls wait 5000-300000 ms by default.".to_string(),
+                "Wait before yielding output. Non-empty writes default to 250 ms and cap at 30000 ms. Empty polls default to the configured background terminal timeout; set this only for explicit short status checks.".to_string(),
             )),
         ),
         (
@@ -138,7 +136,7 @@ pub fn create_write_stdin_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "write_stdin".to_string(),
         description:
-            "Writes characters to an existing unified exec session and returns recent output."
+            "Writes characters to an existing unified exec session and returns recent output. For empty polls, prefer one long wait; do not poll repeatedly just to learn completion because exec_command wakes on exit."
                 .to_string(),
         strict: false,
         defer_loading: None,

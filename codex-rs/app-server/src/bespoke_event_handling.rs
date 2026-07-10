@@ -21,7 +21,6 @@ use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::CommandExecutionSource;
 use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::DeprecationNoticeNotification;
-use codex_app_server_protocol::MonitorEventNotification;
 use codex_app_server_protocol::DynamicToolCallParams;
 use codex_app_server_protocol::ErrorNotification;
 use codex_app_server_protocol::ExecPolicyAmendment as V2ExecPolicyAmendment;
@@ -42,6 +41,7 @@ use codex_app_server_protocol::McpServerStatusUpdatedNotification;
 use codex_app_server_protocol::ModelReroutedNotification;
 use codex_app_server_protocol::ModelSafetyBufferingUpdatedNotification;
 use codex_app_server_protocol::ModelVerificationNotification;
+use codex_app_server_protocol::MonitorEventNotification;
 use codex_app_server_protocol::NetworkApprovalContext as V2NetworkApprovalContext;
 use codex_app_server_protocol::NetworkPolicyAmendment as V2NetworkPolicyAmendment;
 use codex_app_server_protocol::NetworkPolicyRuleAction as V2NetworkPolicyRuleAction;
@@ -876,7 +876,7 @@ pub(crate) async fn apply_bespoke_event_handling(
         EventMsg::MonitorEvent(event) => {
             let notification = MonitorEventNotification {
                 description: event.description,
-                line: event.line,
+                output: event.output,
             };
             outgoing
                 .send_server_notification(ServerNotification::MonitorEvent(notification))

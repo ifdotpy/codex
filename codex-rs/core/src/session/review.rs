@@ -94,7 +94,7 @@ pub(super) async fn spawn_review_thread(
         forked_from_thread_id,
         parent_turn_context.parent_thread_id,
         &session_source,
-        thread_source,
+        thread_source.clone(),
         review_turn_id.clone(),
         #[allow(deprecated)]
         parent_turn_context.cwd.clone(),
@@ -122,6 +122,7 @@ pub(super) async fn spawn_review_thread(
         session_source,
         history_mode: parent_turn_context.history_mode,
         parent_thread_id: parent_turn_context.parent_thread_id,
+        thread_source,
         originator: parent_turn_context.originator.clone(),
         environments: parent_turn_context.environments.clone(),
         available_models,

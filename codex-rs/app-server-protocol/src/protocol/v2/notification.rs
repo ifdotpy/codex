@@ -21,8 +21,8 @@ pub struct DeprecationNoticeNotification {
 pub struct MonitorEventNotification {
     /// Short description of the monitor that produced this event.
     pub description: String,
-    /// The event line emitted by the monitored command.
-    pub line: String,
+    /// Batched output emitted by the monitored command.
+    pub output: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

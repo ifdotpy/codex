@@ -1409,9 +1409,9 @@ pub enum EventMsg {
     /// deprecated and should be phased out.
     DeprecationNotice(DeprecationNoticeEvent),
 
-    /// An event line emitted by a background `monitor` tool watch. Surfaced to
-    /// the user as a distinct notice so the triggering line is visible (the
-    /// agent is separately woken to react to it).
+    /// Batched output emitted by a background `monitor` tool watch. Surfaced to
+    /// the user as a distinct notice, while the agent is separately woken only
+    /// when action may be needed.
     MonitorEvent(MonitorEventEvent),
 
     /// Notification that a model stream experienced an error or disconnect
@@ -3579,9 +3579,8 @@ pub struct DeprecationNoticeEvent {
 pub struct MonitorEventEvent {
     /// Short description of the monitor that produced this event.
     pub description: String,
-    /// The event line (one line of the monitored command's output, or a
-    /// lifecycle message such as "monitor exited").
-    pub line: String,
+    /// Batched output from the monitored command.
+    pub output: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]

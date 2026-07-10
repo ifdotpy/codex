@@ -98,14 +98,23 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
     }
 
     fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
-        Box::pin(self.handle_call(invocation))
+        Box::pin(self.handle_call(invocation, None))
     }
 }
 
 impl ExecCommandHandler {
+    pub(crate) fn handle_with_monitor(
+        &self,
+        invocation: ToolInvocation,
+        monitor_description: String,
+    ) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(self.handle_call(invocation, Some(monitor_description)))
+    }
+
     async fn handle_call(
         &self,
         invocation: ToolInvocation,
+        monitor_description: Option<String>,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
         let ToolInvocation {
             session,
@@ -361,6 +370,7 @@ impl ExecCommandHandler {
                         .permissions_preapproved,
                     justification,
                     prefix_rule,
+                    monitor_description,
                 },
                 &context,
             )

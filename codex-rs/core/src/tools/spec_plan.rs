@@ -72,6 +72,7 @@ use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadSource;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::TOOL_SEARCH_TOOL_NAME;
@@ -342,6 +343,10 @@ fn multi_agent_v2_enabled(turn_context: &TurnContext) -> bool {
 }
 
 fn collab_tools_enabled(turn_context: &TurnContext) -> bool {
+    if side_conversation_turn(turn_context) {
+        return false;
+    }
+
     match turn_context.multi_agent_version {
         MultiAgentVersion::Disabled => false,
         MultiAgentVersion::V1 => !exceeds_thread_spawn_depth_limit(
@@ -350,6 +355,13 @@ fn collab_tools_enabled(turn_context: &TurnContext) -> bool {
         ),
         MultiAgentVersion::V2 => true,
     }
+}
+
+fn side_conversation_turn(turn_context: &TurnContext) -> bool {
+    matches!(
+        turn_context.thread_source.as_ref(),
+        Some(ThreadSource::Feature(source)) if source == "side"
+    )
 }
 
 fn agent_jobs_tools_enabled(turn_context: &TurnContext) -> bool {
@@ -654,7 +666,7 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut Planne
 
     match shell_type_for_model_and_features(&turn_context.model_info, features) {
         ConfigShellToolType::UnifiedExec => {
-            planned_tools.add(ExecCommandHandler::new(ExecCommandHandlerOptions {
+            let exec_command_options = ExecCommandHandlerOptions {
                 allow_login_shell,
                 exec_permission_approvals_enabled,
                 include_environment_id,
@@ -662,7 +674,11 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut Planne
                     turn_context,
                     context.step_context,
                 ),
-            }));
+            };
+            planned_tools.add(ExecCommandHandler::new(exec_command_options));
+            if monitor_tool_enabled_for_turn(turn_context, features) {
+                planned_tools.add(MonitorHandler::new(exec_command_options));
+            }
             planned_tools.add(WriteStdinHandler);
 
             // Keep the legacy shell tool registered while unified exec is
@@ -676,6 +692,15 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut Planne
             planned_tools.add(ShellCommandHandler::new(shell_command_options));
         }
     }
+}
+
+fn monitor_tool_enabled_for_turn(
+    turn_context: &TurnContext,
+    features: &codex_features::Features,
+) -> bool {
+    features.enabled(Feature::MonitorTool)
+        && !side_conversation_turn(turn_context)
+        && !turn_context.session_source.is_non_root_agent()
 }
 
 fn unified_exec_should_include_shell_parameter(
@@ -742,10 +767,6 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
             planned_tools.add(SleepHandler);
         }
     }
-
-    // Monitor: stream events from a background command back into the
-    // conversation. Registered unconditionally in this fork.
-    planned_tools.add(MonitorHandler);
 
     if tool_suggest_enabled(turn_context)
         && let Some(candidates) = context

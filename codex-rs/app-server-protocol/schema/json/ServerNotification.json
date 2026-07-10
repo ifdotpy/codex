@@ -2719,6 +2719,23 @@
       ],
       "type": "object"
     },
+    "MonitorEventNotification": {
+      "properties": {
+        "description": {
+          "description": "Short description of the monitor that produced this event.",
+          "type": "string"
+        },
+        "output": {
+          "description": "Batched output emitted by the monitored command.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "output"
+      ],
+      "type": "object"
+    },
     "MultiAgentMode": {
       "description": "Controls the effective multi-agent delegation instructions for a turn. `custom` means the configured mode hint defines the policy instead of a built-in policy.",
       "oneOf": [
@@ -6824,6 +6841,26 @@
         "params"
       ],
       "title": "DeprecationNoticeNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "monitorEvent"
+          ],
+          "title": "MonitorEventNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/MonitorEventNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "MonitorEventNotification",
       "type": "object"
     },
     {

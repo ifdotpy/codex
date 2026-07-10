@@ -203,23 +203,29 @@ impl HistoryCell for DeprecationNoticeCell {
 #[derive(Debug)]
 pub(crate) struct MonitorEventCell {
     description: String,
-    line: String,
+    output: String,
 }
 
-pub(crate) fn new_monitor_event(description: String, line: String) -> MonitorEventCell {
-    MonitorEventCell { description, line }
+pub(crate) fn new_monitor_event(description: String, output: String) -> MonitorEventCell {
+    MonitorEventCell {
+        description,
+        output,
+    }
 }
 
 impl HistoryCell for MonitorEventCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        // A batch may carry several output lines; render them compactly under a
-        // single 📡 header (cyan, so it reads as neither user nor agent speech).
-        let event_lines: Vec<&str> = self.line.split('\n').collect();
+        // A batch may carry several output lines; render them compactly under one header.
+        let event_lines: Vec<&str> = self.output.split('\n').collect();
         let mut lines: Vec<Line<'static>> = Vec::new();
         let header = if event_lines.len() > 1 {
-            format!("📡 monitor[{}] · {} lines", self.description, event_lines.len())
+            format!(
+                "monitor[{}] · {} lines",
+                self.description,
+                event_lines.len()
+            )
         } else {
-            format!("📡 monitor[{}]", self.description)
+            format!("monitor[{}]", self.description)
         };
         lines.push(vec![header.cyan().bold()].into());
 
@@ -235,7 +241,7 @@ impl HistoryCell for MonitorEventCell {
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![Line::from(format!("monitor[{}]", self.description))];
-        for el in self.line.split('\n') {
+        for el in self.output.split('\n') {
             lines.push(Line::from(format!("  {el}")));
         }
         lines

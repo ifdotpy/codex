@@ -517,6 +517,25 @@ impl AppServerSession {
         config: Config,
         thread_id: ThreadId,
     ) -> Result<AppServerStartedThread> {
+        self.fork_thread_with_source(config, thread_id, ThreadSource::User)
+            .await
+    }
+
+    pub(crate) async fn fork_side_thread(
+        &mut self,
+        config: Config,
+        thread_id: ThreadId,
+    ) -> Result<AppServerStartedThread> {
+        self.fork_thread_with_source(config, thread_id, ThreadSource::Feature("side".to_string()))
+            .await
+    }
+
+    async fn fork_thread_with_source(
+        &mut self,
+        config: Config,
+        thread_id: ThreadId,
+        thread_source: ThreadSource,
+    ) -> Result<AppServerStartedThread> {
         let request_id = self.next_request_id();
         let session_config = self.session_config_with_effective_service_tier(&config);
         let response: ThreadForkResponse = self
@@ -528,6 +547,7 @@ impl AppServerSession {
                     thread_id,
                     self.thread_params_mode(),
                     self.remote_cwd_override.as_deref(),
+                    thread_source,
                 ),
             })
             .await
@@ -1472,6 +1492,7 @@ fn thread_fork_params_from_config(
     thread_id: ThreadId,
     thread_params_mode: ThreadParamsMode,
     remote_cwd_override: Option<&std::path::Path>,
+    thread_source: ThreadSource,
 ) -> ThreadForkParams {
     let permissions = permissions_selection_from_config(&config, thread_params_mode);
     let sandbox = permissions
@@ -1501,7 +1522,7 @@ fn thread_fork_params_from_config(
             config.developer_instructions.clone(),
         ),
         ephemeral: config.ephemeral,
-        thread_source: Some(ThreadSource::User),
+        thread_source: Some(thread_source),
         ..ThreadForkParams::default()
     }
 }
@@ -2029,6 +2050,7 @@ mod tests {
             thread_id,
             ThreadParamsMode::Remote,
             /*remote_cwd_override*/ None,
+            ThreadSource::User,
         );
 
         assert_eq!(start.cwd, None);
@@ -2146,6 +2168,7 @@ mod tests {
             thread_id,
             ThreadParamsMode::Remote,
             Some(remote_cwd.as_path()),
+            ThreadSource::User,
         );
 
         assert_eq!(start.cwd.as_deref(), Some("repo/on/server"));
@@ -2197,6 +2220,7 @@ mod tests {
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
+            ThreadSource::User,
         );
 
         let expected_service_tier = Some(Some(ServiceTier::Fast.request_value().to_string()));
@@ -2251,12 +2275,33 @@ mod tests {
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
+            ThreadSource::User,
         );
 
         assert_eq!(params.base_instructions.as_deref(), Some("Base override."));
         assert_eq!(
             params.developer_instructions.as_deref(),
             Some("Developer override.")
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_fork_params_can_mark_side_source() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let config = build_config(&temp_dir).await;
+        let thread_id = ThreadId::new();
+
+        let params = thread_fork_params_from_config(
+            config,
+            thread_id,
+            ThreadParamsMode::Embedded,
+            /*remote_cwd_override*/ None,
+            ThreadSource::Feature("side".to_string()),
+        );
+
+        assert_eq!(
+            params.thread_source,
+            Some(ThreadSource::Feature("side".to_string()))
         );
     }
 
@@ -2284,6 +2329,7 @@ mod tests {
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
+            ThreadSource::User,
         );
 
         assert_eq!(control_start.developer_instructions, None);
@@ -2313,6 +2359,7 @@ mod tests {
             thread_id,
             ThreadParamsMode::Embedded,
             /*remote_cwd_override*/ None,
+            ThreadSource::User,
         );
         let expected = format!(
             "Developer override.\n\n{}",

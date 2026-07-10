@@ -23,10 +23,22 @@ struct WriteStdinArgs {
     session_id: i32,
     #[serde(default)]
     chars: String,
-    #[serde(default = "super::default_write_stdin_yield_time_ms")]
-    yield_time_ms: u64,
+    #[serde(default)]
+    yield_time_ms: Option<u64>,
     #[serde(default)]
     max_output_tokens: Option<usize>,
+}
+
+fn resolve_yield_time_ms(args: &WriteStdinArgs) -> u64 {
+    args.yield_time_ms.unwrap_or_else(|| {
+        if args.chars.is_empty() {
+            // Empty stdin is an await, not an interaction. Let the process
+            // manager clamp to the configured background terminal maximum.
+            u64::MAX
+        } else {
+            super::default_write_stdin_yield_time_ms()
+        }
+    })
 }
 
 pub struct WriteStdinHandler;
@@ -67,13 +79,14 @@ impl WriteStdinHandler {
         };
 
         let args: WriteStdinArgs = parse_arguments(&arguments)?;
+        let yield_time_ms = resolve_yield_time_ms(&args);
         let response = session
             .services
             .unified_exec_manager
             .write_stdin(WriteStdinRequest {
                 process_id: args.session_id,
                 input: &args.chars,
-                yield_time_ms: args.yield_time_ms,
+                yield_time_ms,
                 max_output_tokens: args.max_output_tokens,
                 truncation_policy: turn.model_info.truncation_policy.into(),
             })
@@ -99,6 +112,50 @@ impl WriteStdinHandler {
         }
 
         Ok(boxed_tool_output(response))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_write_without_yield_uses_background_max_sentinel() {
+        let args = WriteStdinArgs {
+            session_id: 1,
+            chars: String::new(),
+            yield_time_ms: None,
+            max_output_tokens: None,
+        };
+
+        assert_eq!(resolve_yield_time_ms(&args), u64::MAX);
+    }
+
+    #[test]
+    fn non_empty_write_without_yield_stays_responsive() {
+        let args = WriteStdinArgs {
+            session_id: 1,
+            chars: "q".to_string(),
+            yield_time_ms: None,
+            max_output_tokens: None,
+        };
+
+        assert_eq!(
+            resolve_yield_time_ms(&args),
+            super::super::default_write_stdin_yield_time_ms()
+        );
+    }
+
+    #[test]
+    fn explicit_yield_is_preserved() {
+        let args = WriteStdinArgs {
+            session_id: 1,
+            chars: String::new(),
+            yield_time_ms: Some(30_000),
+            max_output_tokens: None,
+        };
+
+        assert_eq!(resolve_yield_time_ms(&args), 30_000);
     }
 }
 
