@@ -1,16 +1,20 @@
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio::time::Sleep;
 
 use super::UnifiedExecContext;
+use super::monitor::enqueue_background_notification;
 use super::process::UnifiedExecProcess;
+use crate::context::BackgroundTerminalNotification;
 use crate::exec::MAX_EXEC_OUTPUT_DELTAS_PER_CALL;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -19,24 +23,15 @@ use crate::tools::events::ToolEventCtx;
 use crate::tools::events::ToolEventFailure;
 use crate::tools::events::ToolEventStage;
 use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
-use codex_protocol::AgentPath;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::exec_output::StreamOutput;
-use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::ExecOutputStream;
-use codex_protocol::protocol::InterAgentCommunication;
-use codex_protocol::protocol::MonitorEventEvent;
 use codex_utils_path_uri::PathUri;
-use codex_utils_string::take_bytes_at_char_boundary;
 
 pub(crate) const TRAILING_OUTPUT_GRACE: Duration = Duration::from_millis(100);
-const MONITOR_FLUSH_DEBOUNCE: Duration = Duration::from_millis(800);
-const MONITOR_MAX_BATCH_LINES: usize = 50;
-const MONITOR_MAX_LINE_BYTES: usize = 4096;
-const MONITOR_MAX_PENDING_BYTES: usize = 8192;
 
 /// Upper bound for a single ExecCommandOutputDelta chunk emitted by unified exec.
 ///
@@ -113,182 +108,54 @@ pub(crate) fn start_streaming_output(
     });
 }
 
-static BG_WAKE_SEQ: AtomicU64 = AtomicU64::new(0);
-static MONITOR_WAKE_SEQ: AtomicU64 = AtomicU64::new(0);
+const EXIT_WAKE_PENDING: u8 = 0;
+const EXIT_WAKE_ENABLED: u8 = 1;
+const EXIT_WAKE_DISABLED: u8 = 2;
 
-pub(crate) fn start_monitoring_output(
-    process: &UnifiedExecProcess,
-    context: &UnifiedExecContext,
-    description: String,
-) {
-    let mut receiver = process.output_receiver();
-    let exit_token = process.cancellation_token();
-    let session_ref = Arc::clone(&context.session);
+pub(crate) struct ExitWakeDecision {
+    state: AtomicU8,
+    notify: Notify,
+}
 
-    tokio::spawn(async move {
-        use tokio::sync::broadcast::error::RecvError;
+impl ExitWakeDecision {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: AtomicU8::new(EXIT_WAKE_PENDING),
+            notify: Notify::new(),
+        }
+    }
 
-        let mut pending = String::new();
-        let mut lines = Vec::<String>::new();
-        let mut grace_sleep: Option<Pin<Box<Sleep>>> = None;
+    pub(crate) fn decide(&self, enabled: bool) {
+        let state = if enabled {
+            EXIT_WAKE_ENABLED
+        } else {
+            EXIT_WAKE_DISABLED
+        };
+        if self
+            .state
+            .compare_exchange(
+                EXIT_WAKE_PENDING,
+                state,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.notify.notify_waiters();
+        }
+    }
 
+    async fn enabled(&self) -> bool {
         loop {
-            tokio::select! {
-                _ = exit_token.cancelled(), if grace_sleep.is_none() => {
-                    let deadline = Instant::now() + TRAILING_OUTPUT_GRACE;
-                    grace_sleep.replace(Box::pin(tokio::time::sleep_until(deadline)));
-                }
-
-                _ = async {
-                    if let Some(sleep) = grace_sleep.as_mut() {
-                        sleep.as_mut().await;
-                    }
-                }, if grace_sleep.is_some() => {
-                    break;
-                }
-
-                received = receiver.recv() => {
-                    match received {
-                        Ok(chunk) => {
-                            push_monitor_chunk(&mut pending, &mut lines, &chunk);
-                            if lines.len() >= MONITOR_MAX_BATCH_LINES {
-                                deliver_monitor_batch(
-                                    &session_ref,
-                                    &description,
-                                    std::mem::take(&mut lines),
-                                ).await;
-                            }
-                        }
-                        Err(RecvError::Lagged(skipped)) => {
-                            lines.push(format!(
-                                "[monitor skipped {skipped} output chunk(s)]"
-                            ));
-                        }
-                        Err(RecvError::Closed) => {
-                            break;
-                        }
-                    }
-                }
-
-                _ = tokio::time::sleep(MONITOR_FLUSH_DEBOUNCE), if !lines.is_empty() => {
-                    deliver_monitor_batch(
-                        &session_ref,
-                        &description,
-                        std::mem::take(&mut lines),
-                    ).await;
-                }
+            let notified = self.notify.notified();
+            match self.state.load(Ordering::Acquire) {
+                EXIT_WAKE_ENABLED => return true,
+                EXIT_WAKE_DISABLED => return false,
+                EXIT_WAKE_PENDING => notified.await,
+                _ => unreachable!("invalid exit wake decision"),
             }
         }
-
-        if !pending.trim().is_empty() {
-            lines.push(truncate_monitor_line(
-                pending.trim_end_matches(['\r', '\n']),
-            ));
-        }
-        if !lines.is_empty() {
-            deliver_monitor_batch(&session_ref, &description, lines).await;
-        }
-    });
-}
-
-fn push_monitor_chunk(pending: &mut String, lines: &mut Vec<String>, chunk: &[u8]) {
-    pending.push_str(&String::from_utf8_lossy(chunk));
-
-    while let Some(newline) = pending.find('\n') {
-        let mut line = pending.drain(..=newline).collect::<String>();
-        while line.ends_with('\n') || line.ends_with('\r') {
-            line.pop();
-        }
-        if !line.trim().is_empty() {
-            lines.push(truncate_monitor_line(&line));
-        }
     }
-
-    if pending.len() > MONITOR_MAX_PENDING_BYTES {
-        lines.push(format!(
-            "{}... [truncated unterminated line]",
-            take_bytes_at_char_boundary(pending, MONITOR_MAX_LINE_BYTES)
-        ));
-        pending.clear();
-    }
-}
-
-fn truncate_monitor_line(line: &str) -> String {
-    if line.len() <= MONITOR_MAX_LINE_BYTES {
-        line.to_string()
-    } else {
-        format!(
-            "{}... [truncated]",
-            take_bytes_at_char_boundary(line, MONITOR_MAX_LINE_BYTES)
-        )
-    }
-}
-
-async fn deliver_monitor_batch(session: &Arc<Session>, description: &str, lines: Vec<String>) {
-    if lines.is_empty() {
-        return;
-    }
-
-    let sub_id = format!(
-        "monitor-{}",
-        MONITOR_WAKE_SEQ.fetch_add(1, Ordering::Relaxed)
-    );
-    let joined = lines.join("\n");
-
-    session
-        .send_event_raw(Event {
-            id: sub_id.clone(),
-            msg: EventMsg::MonitorEvent(MonitorEventEvent {
-                description: description.to_string(),
-                output: joined.clone(),
-            }),
-        })
-        .await;
-
-    let comm = InterAgentCommunication::new(
-        AgentPath::morpheus(),
-        AgentPath::root(),
-        Vec::new(),
-        format!(
-            "Background monitor `{description}` produced output:\n{joined}\n\nRespond only if action is needed."
-        ),
-        true,
-    );
-    session
-        .input_queue
-        .enqueue_mailbox_communication(comm)
-        .await;
-    session
-        .maybe_start_turn_for_pending_work_with_sub_id(sub_id)
-        .await;
-}
-
-/// Wake the session once when a backgrounded (unified-exec) process exits, so
-/// the agent learns the outcome without polling the background terminal.
-///
-/// Reuses the mailbox + pending-work path, which is idle-gated: it only starts
-/// a fresh turn when the session is idle (a truly backgrounded command). If a
-/// turn is active, for example a short command the model is still reading, the item
-/// simply drains into that turn, so this never spawns a spurious turn or
-/// interrupts ongoing work.
-async fn wake_session_on_background_exit(session: &Arc<Session>, command: &str, outcome: &str) {
-    let comm = InterAgentCommunication::new(
-        AgentPath::morpheus(),
-        AgentPath::root(),
-        Vec::new(),
-        format!(
-            "Background command finished: `{command}` {outcome}. Its output is in the exec results. Respond only if action is needed."
-        ),
-        true,
-    );
-    let sub_id = format!("bg-exit-{}", BG_WAKE_SEQ.fetch_add(1, Ordering::Relaxed));
-    session
-        .input_queue
-        .enqueue_mailbox_communication(comm)
-        .await;
-    session
-        .maybe_start_turn_for_pending_work_with_sub_id(sub_id)
-        .await;
 }
 
 /// Spawn a background watcher that waits for the PTY to exit and then emits a
@@ -304,12 +171,10 @@ pub(crate) fn spawn_exit_watcher(
     process_id: i32,
     transcript: Arc<Mutex<HeadTailBuffer>>,
     started_at: Instant,
-    // Set true (once) only when the initiating exec_command call reported this
-    // process as still running, so the model was told it is backgrounded.
-    // We wake the model on exit only in that case; a command that completed
-    // within its initial call already delivered its output there and must not
-    // wake (waking it would spuriously start a turn and can cascade).
-    wake_on_exit: Arc<AtomicBool>,
+    description: Option<String>,
+    mut monitor_completed: Option<watch::Receiver<bool>>,
+    explicit_waiters: Arc<AtomicUsize>,
+    wake_on_exit: Arc<ExitWakeDecision>,
 ) {
     let exit_token = process.cancellation_token();
     let output_drained = process.output_drained_notify();
@@ -317,13 +182,16 @@ pub(crate) fn spawn_exit_watcher(
     tokio::spawn(async move {
         exit_token.cancelled().await;
         output_drained.notified().await;
+        if let Some(completed) = monitor_completed.as_mut() {
+            let _ = completed.wait_for(|completed| *completed).await;
+        }
 
         let duration = Instant::now().saturating_duration_since(started_at);
-        // The emit_* calls consume `session_ref` and `command`; keep a handle
-        // and display string for the completion wake below.
         let session_for_wake = Arc::clone(&session_ref);
-        let command_display = command.join(" ");
-        let outcome = if let Some(message) = process.failure_message() {
+        let description = description.unwrap_or_else(|| command.join(" "));
+        let notification = if let Some(message) = process.failure_message() {
+            let notification =
+                BackgroundTerminalNotification::failed(process_id, &description, &message);
             emit_failed_exec_end_for_unified_exec(
                 session_ref,
                 turn_ref,
@@ -337,9 +205,11 @@ pub(crate) fn spawn_exit_watcher(
                 duration,
             )
             .await;
-            "failed".to_string()
+            notification
         } else {
-            let exit_code = process.exit_code().unwrap_or(-1);
+            let exit_code = process.exit_code();
+            let notification =
+                BackgroundTerminalNotification::exited(process_id, &description, exit_code);
             emit_exec_end_for_unified_exec(
                 session_ref,
                 turn_ref,
@@ -349,19 +219,15 @@ pub(crate) fn spawn_exit_watcher(
                 Some(process_id.to_string()),
                 transcript,
                 String::new(),
-                exit_code,
+                exit_code.unwrap_or(-1),
                 duration,
             )
             .await;
-            format!("exited (code {exit_code})")
+            notification
         };
 
-        // Push a single completion wake so the agent reacts on exit instead of
-        // polling the background terminal, but only for a genuinely backgrounded
-        // process (the initial call already returned). Short synchronous commands
-        // deliver their output through the initiating call and must not wake.
-        if wake_on_exit.load(Ordering::Acquire) {
-            wake_session_on_background_exit(&session_for_wake, &command_display, &outcome).await;
+        if wake_on_exit.enabled().await && explicit_waiters.load(Ordering::Acquire) == 0 {
+            enqueue_background_notification(&session_for_wake, notification).await;
         }
     });
 }

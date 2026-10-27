@@ -1,5 +1,3 @@
-use super::MONITOR_MAX_LINE_BYTES;
-use super::push_monitor_chunk;
 use super::split_valid_utf8_prefix_with_max;
 
 use pretty_assertions::assert_eq;
@@ -38,33 +36,4 @@ fn split_valid_utf8_prefix_makes_progress_on_invalid_utf8() {
         split_valid_utf8_prefix_with_max(&mut buf, /*max_bytes*/ 2).expect("expected prefix");
     assert_eq!(first, vec![0xff]);
     assert_eq!(buf, b"ab".to_vec());
-}
-
-#[test]
-fn push_monitor_chunk_keeps_partial_tail_pending() {
-    let mut pending = String::new();
-    let mut lines = Vec::new();
-
-    push_monitor_chunk(&mut pending, &mut lines, b"one\ntwo");
-
-    assert_eq!(lines, vec!["one"]);
-    assert_eq!(pending, "two");
-}
-
-#[test]
-fn push_monitor_chunk_truncates_long_complete_line() {
-    let mut pending = String::new();
-    let mut lines = Vec::new();
-    let line = "a".repeat(MONITOR_MAX_LINE_BYTES + 1);
-
-    push_monitor_chunk(&mut pending, &mut lines, format!("{line}\n").as_bytes());
-
-    assert_eq!(pending, "");
-    assert_eq!(
-        lines,
-        vec![format!(
-            "{}... [truncated]",
-            "a".repeat(MONITOR_MAX_LINE_BYTES)
-        )]
-    );
 }

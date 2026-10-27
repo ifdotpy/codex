@@ -72,7 +72,6 @@ use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol::protocol::ThreadSource;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::TOOL_SEARCH_TOOL_NAME;
@@ -343,10 +342,6 @@ fn multi_agent_v2_enabled(turn_context: &TurnContext) -> bool {
 }
 
 fn collab_tools_enabled(turn_context: &TurnContext) -> bool {
-    if side_conversation_turn(turn_context) {
-        return false;
-    }
-
     match turn_context.multi_agent_version {
         MultiAgentVersion::Disabled => false,
         MultiAgentVersion::V1 => !exceeds_thread_spawn_depth_limit(
@@ -355,13 +350,6 @@ fn collab_tools_enabled(turn_context: &TurnContext) -> bool {
         ),
         MultiAgentVersion::V2 => true,
     }
-}
-
-fn side_conversation_turn(turn_context: &TurnContext) -> bool {
-    matches!(
-        turn_context.thread_source.as_ref(),
-        Some(ThreadSource::Feature(source)) if source == "side"
-    )
 }
 
 fn agent_jobs_tools_enabled(turn_context: &TurnContext) -> bool {
@@ -698,9 +686,7 @@ fn monitor_tool_enabled_for_turn(
     turn_context: &TurnContext,
     features: &codex_features::Features,
 ) -> bool {
-    features.enabled(Feature::MonitorTool)
-        && !side_conversation_turn(turn_context)
-        && !turn_context.session_source.is_non_root_agent()
+    features.enabled(Feature::MonitorTool) && !turn_context.session_source.is_non_root_agent()
 }
 
 fn unified_exec_should_include_shell_parameter(

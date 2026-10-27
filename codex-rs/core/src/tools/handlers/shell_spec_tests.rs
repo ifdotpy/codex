@@ -22,11 +22,11 @@ fn exec_command_tool_matches_expected_spec() {
 
     let description = if cfg!(windows) {
         format!(
-            "Runs a command in a PTY, returning output or a session ID for ongoing interaction. If a command is still running when the call returns, Codex wakes you when it exits, so do not poll only to learn completion.{}",
+            "Runs a command in a PTY, returning output or a session ID for ongoing interaction.{}",
             windows_shell_guidance_description()
         )
     } else {
-        "Runs a command in a PTY, returning output or a session ID for ongoing interaction. If a command is still running when the call returns, Codex wakes you when it exits, so do not poll only to learn completion."
+        "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
             .to_string()
     };
 
@@ -146,7 +146,7 @@ fn write_stdin_tool_matches_expected_spec() {
         ToolSpec::Function(ResponsesApiTool {
             name: "write_stdin".to_string(),
             description:
-                "Writes characters to an existing unified exec session and returns recent output. For empty polls, prefer one long wait; do not poll repeatedly just to learn completion because exec_command wakes on exit."
+                "Writes characters to an existing unified exec session and returns recent output. For empty polls, prefer one long wait to repeated status checks."
                     .to_string(),
             strict: false,
             defer_loading: None,

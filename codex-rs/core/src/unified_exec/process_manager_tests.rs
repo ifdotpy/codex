@@ -292,7 +292,7 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
         additional_permissions_preapproved: false,
         justification: None,
         prefix_rule: None,
-        monitor_description: None,
+        monitor_config: None,
     };
 
     let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
@@ -335,71 +335,6 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
         item.aggregated_output.as_deref(),
         Some("PRE_DENIAL_MARKER\nNetwork access denied")
     );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn monitor_description_emits_monitor_event_from_unified_exec_output() {
-    let (session, turn, rx_event) = crate::session::tests::make_session_and_context_with_rx().await;
-    let manager = &session.services.unified_exec_manager;
-    let process_id = manager.allocate_process_id().await;
-    let context = UnifiedExecContext::new(
-        Arc::clone(&session),
-        Arc::clone(&turn),
-        "call-monitor-e2e".to_string(),
-    );
-    let request = ExecCommandRequest {
-        command: vec![
-            "sh".to_string(),
-            "-lc".to_string(),
-            "sleep 0.3; printf 'MONITOR_E2E\\n'; sleep 0.1".to_string(),
-        ],
-        shell_type: crate::shell::ShellType::Sh,
-        hook_command: "monitor e2e".to_string(),
-        process_id,
-        yield_time_ms: 250,
-        max_output_tokens: None,
-        #[allow(deprecated)]
-        cwd: turn.cwd.clone().into(),
-        #[allow(deprecated)]
-        sandbox_cwd: turn.cwd.clone().into(),
-        turn_environment: turn
-            .environments
-            .primary()
-            .cloned()
-            .expect("primary environment"),
-        shell_mode: codex_tools::UnifiedExecShellMode::Direct,
-        network: None,
-        tty: false,
-        sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
-        additional_permissions: None,
-        additional_permissions_preapproved: false,
-        justification: None,
-        prefix_rule: None,
-        monitor_description: Some("e2e monitor".to_string()),
-    };
-
-    manager
-        .exec_command(request, &context)
-        .await
-        .expect("exec command starts");
-
-    let event = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let event = rx_event.recv().await.expect("event channel open");
-            if let codex_protocol::protocol::EventMsg::MonitorEvent(event) = event.msg {
-                return event;
-            }
-        }
-    })
-    .await
-    .expect("timed out waiting for monitor event");
-
-    assert_eq!(event.description, "e2e monitor");
-    assert!(event.output.contains("MONITOR_E2E"));
-    session
-        .abort_all_tasks(codex_protocol::protocol::TurnAbortReason::Interrupted)
-        .await;
 }
 
 #[test]

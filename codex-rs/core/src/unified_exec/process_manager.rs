@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use tokio::sync::Notify;
 use tokio::sync::watch;
@@ -35,6 +36,7 @@ use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::unified_exec::ExecCommandRequest;
+use crate::unified_exec::ExplicitWaitGuard;
 use crate::unified_exec::MAX_UNIFIED_EXEC_PROCESSES;
 use crate::unified_exec::MAX_YIELD_TIME_MS;
 use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
@@ -45,14 +47,16 @@ use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::unified_exec::WriteStdinRequest;
+use crate::unified_exec::async_watcher::ExitWakeDecision;
 use crate::unified_exec::async_watcher::emit_exec_end_for_unified_exec;
 use crate::unified_exec::async_watcher::emit_failed_exec_end_for_unified_exec;
 use crate::unified_exec::async_watcher::spawn_exit_watcher;
-use crate::unified_exec::async_watcher::start_monitoring_output;
 use crate::unified_exec::async_watcher::start_streaming_output;
 use crate::unified_exec::clamp_yield_time;
 use crate::unified_exec::generate_chunk_id;
 use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
+use crate::unified_exec::monitor::start_monitor_timeout;
+use crate::unified_exec::monitor::start_monitoring_output;
 use crate::unified_exec::process::OutputBuffer;
 use crate::unified_exec::process::OutputHandles;
 use crate::unified_exec::process::SpawnLifecycleHandle;
@@ -211,10 +215,31 @@ struct PreparedProcessHandles {
     hook_command: String,
     process_id: i32,
     tty: bool,
+    explicit_waiters: Arc<AtomicUsize>,
 }
 
 struct InitialExecCommandGuard {
     active: Arc<AtomicBool>,
+}
+
+struct ExitWakeDecisionGuard {
+    decision: Arc<ExitWakeDecision>,
+}
+
+impl ExitWakeDecisionGuard {
+    fn new(decision: Arc<ExitWakeDecision>) -> Self {
+        Self { decision }
+    }
+
+    fn enable(&self) {
+        self.decision.decide(true);
+    }
+}
+
+impl Drop for ExitWakeDecisionGuard {
+    fn drop(&mut self) {
+        self.decision.decide(false);
+    }
 }
 
 impl Drop for InitialExecCommandGuard {
@@ -434,6 +459,7 @@ impl UnifiedExecProcessManager {
         }
 
         let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+        let explicit_waiters = Arc::new(AtomicUsize::new(0));
         let event_ctx = ToolEventCtx::new(
             context.session.as_ref(),
             context.turn.as_ref(),
@@ -449,18 +475,29 @@ impl UnifiedExecProcessManager {
         emitter.emit(event_ctx, ToolEventStage::Begin).await;
 
         start_streaming_output(&process, context, Arc::clone(&transcript));
-        if let Some(description) = request.monitor_description.clone() {
-            start_monitoring_output(&process, context, description);
-        }
+        let monitor_output = request.monitor_config.as_ref().map(|monitor_config| {
+            if let Some(timeout) = monitor_config.timeout {
+                start_monitor_timeout(Arc::clone(&process), timeout);
+            }
+            start_monitoring_output(
+                Arc::clone(&process),
+                context,
+                request.process_id,
+                monitor_config.description.clone(),
+                Arc::clone(&explicit_waiters),
+            )
+        });
+        let monitor_completed = monitor_output
+            .as_ref()
+            .map(super::monitor::MonitorOutputHandle::completion_receiver);
         let start = Instant::now();
         // Persist live sessions before the initial yield wait so interrupting the
         // turn cannot drop the last Arc and terminate the background process.
         let process_started_alive = !process.has_exited() && process.exit_code().is_none();
-        // Set true (once) below iff we report this process to the model as still
-        // running. The exit watcher wakes the model only when this is set, so a
-        // backgrounded command's completion is surfaced while a command that
-        // finished within this call (its output already returned here) is not.
-        let wake_on_exit = Arc::new(AtomicBool::new(false));
+        // Set true (once) below iff a monitor is reported as still running.
+        // Commands that finish within this call already return their result.
+        let wake_on_exit = Arc::new(ExitWakeDecision::new());
+        let wake_on_exit_guard = ExitWakeDecisionGuard::new(Arc::clone(&wake_on_exit));
         let _initial_exec_command_guard = if process_started_alive {
             let initial_exec_command_active = Arc::new(AtomicBool::new(true));
             self.store_process(
@@ -475,6 +512,12 @@ impl UnifiedExecProcessManager {
                 deferred_network_approval.clone(),
                 Arc::clone(&transcript),
                 Arc::clone(&initial_exec_command_active),
+                Arc::clone(&explicit_waiters),
+                request
+                    .monitor_config
+                    .as_ref()
+                    .map(|monitor_config| monitor_config.description.clone()),
+                monitor_completed,
                 Arc::clone(&wake_on_exit),
             )
             .await;
@@ -565,8 +608,12 @@ impl UnifiedExecProcessManager {
                     process_id,
                     ..
                 } => {
-                    // Reported to the model as still running → wake it on exit.
-                    wake_on_exit.store(true, Ordering::Release);
+                    if let Some(monitor_output) = monitor_output.as_ref() {
+                        // Reported to the model as a live monitor. Arm output
+                        // delivery and wake the model when the monitor exits.
+                        wake_on_exit_guard.enable();
+                        monitor_output.arm();
+                    }
                     (Some(process_id), exit_code)
                 }
                 ProcessStatus::Exited { exit_code, entry } => {
@@ -667,8 +714,9 @@ impl UnifiedExecProcessManager {
             hook_command,
             process_id,
             tty,
-            ..
+            explicit_waiters,
         } = self.prepare_process_handles(process_id).await?;
+        let _explicit_wait_guard = ExplicitWaitGuard::new(explicit_waiters);
         let mut status_after_write = None;
 
         if !request.input.is_empty() {
@@ -865,6 +913,7 @@ impl UnifiedExecProcessManager {
             hook_command: entry.hook_command.clone(),
             process_id: entry.process_id,
             tty: entry.tty,
+            explicit_waiters: Arc::clone(&entry.explicit_waiters),
         })
     }
 
@@ -882,7 +931,10 @@ impl UnifiedExecProcessManager {
         network_approval: Option<DeferredNetworkApproval>,
         transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
         initial_exec_command_active: Arc<AtomicBool>,
-        wake_on_exit: Arc<AtomicBool>,
+        explicit_waiters: Arc<AtomicUsize>,
+        monitor_description: Option<String>,
+        monitor_completed: Option<watch::Receiver<bool>>,
+        wake_on_exit: Arc<ExitWakeDecision>,
     ) {
         let entry = ProcessEntry {
             process: Arc::clone(&process),
@@ -890,6 +942,7 @@ impl UnifiedExecProcessManager {
             process_id,
             cwd: cwd.clone(),
             initial_exec_command_active,
+            explicit_waiters: Arc::clone(&explicit_waiters),
             hook_command,
             tty,
             network_approval,
@@ -919,6 +972,9 @@ impl UnifiedExecProcessManager {
             process_id,
             transcript,
             started_at,
+            monitor_description,
+            monitor_completed,
+            explicit_waiters,
             wake_on_exit,
         );
     }

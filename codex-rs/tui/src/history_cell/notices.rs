@@ -200,54 +200,6 @@ impl HistoryCell for DeprecationNoticeCell {
         lines
     }
 }
-#[derive(Debug)]
-pub(crate) struct MonitorEventCell {
-    description: String,
-    output: String,
-}
-
-pub(crate) fn new_monitor_event(description: String, output: String) -> MonitorEventCell {
-    MonitorEventCell {
-        description,
-        output,
-    }
-}
-
-impl HistoryCell for MonitorEventCell {
-    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        // A batch may carry several output lines; render them compactly under one header.
-        let event_lines: Vec<&str> = self.output.split('\n').collect();
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        let header = if event_lines.len() > 1 {
-            format!(
-                "monitor[{}] · {} lines",
-                self.description,
-                event_lines.len()
-            )
-        } else {
-            format!("monitor[{}]", self.description)
-        };
-        lines.push(vec![header.cyan().bold()].into());
-
-        let wrap_width = width.saturating_sub(4).max(1) as usize;
-        for el in event_lines {
-            let body = Line::from(format!("  {el}"));
-            let wrapped = adaptive_wrap_line(&body, RtOptions::new(wrap_width));
-            push_owned_lines(&wrapped, &mut lines);
-        }
-
-        lines
-    }
-
-    fn raw_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from(format!("monitor[{}]", self.description))];
-        for el in self.output.split('\n') {
-            lines.push(Line::from(format!("  {el}")));
-        }
-        lines
-    }
-}
-
 pub(crate) fn new_info_event(message: String, hint: Option<String>) -> PlainHistoryCell {
     let mut line = vec!["• ".dim(), message.into()];
     if let Some(hint) = hint {

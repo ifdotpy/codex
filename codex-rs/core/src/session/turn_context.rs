@@ -11,7 +11,6 @@ use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
-use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_sandboxing::compatibility_sandbox_policy_for_permission_profile;
 use codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy;
@@ -115,7 +114,6 @@ pub struct TurnContext {
     pub(crate) session_source: SessionSource,
     pub(crate) history_mode: ThreadHistoryMode,
     pub(crate) parent_thread_id: Option<ThreadId>,
-    pub(crate) thread_source: Option<ThreadSource>,
     pub(crate) originator: String,
     pub(crate) environments: TurnEnvironmentSnapshot,
     /// The session's absolute working directory. All relative paths provided
@@ -276,7 +274,6 @@ impl TurnContext {
             session_source: self.session_source.clone(),
             history_mode: self.history_mode,
             parent_thread_id: self.parent_thread_id,
-            thread_source: self.thread_source.clone(),
             originator: self.originator.clone(),
             environments: self.environments.clone(),
             #[allow(deprecated)]
@@ -557,7 +554,6 @@ impl Session {
             session_source,
             history_mode: session_configuration.history_mode,
             parent_thread_id: session_configuration.parent_thread_id,
-            thread_source: session_configuration.thread_source.clone(),
             originator: session_configuration.originator.clone(),
             environments,
             #[allow(deprecated)]

@@ -8,7 +8,6 @@ use codex_mcp::ToolInfo;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
-use codex_protocol::ThreadId;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::openai_models::ApplyPatchToolType;
@@ -18,7 +17,6 @@ use codex_protocol::openai_models::ToolMode;
 use codex_protocol::openai_models::WebSearchToolType;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol::protocol::ThreadSource;
 use codex_tools::DiscoverablePluginInfo;
 use codex_tools::DiscoverableTool;
 use codex_tools::ResponsesApiNamespaceTool;
@@ -523,6 +521,23 @@ async fn monitor_tool_requires_monitor_feature_and_unified_exec() {
     enabled.assert_visible_contains(&["exec_command", "monitor", "write_stdin"]);
     enabled.assert_registered_contains(&["monitor"]);
 
+    let subagent = probe(|turn| {
+        set_features(
+            turn,
+            &[
+                Feature::ShellTool,
+                Feature::UnifiedExec,
+                Feature::MonitorTool,
+            ],
+        );
+        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
+        turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
+        turn.session_source = SessionSource::SubAgent(SubAgentSource::Other("worker".to_string()));
+    })
+    .await;
+    subagent.assert_visible_lacks(&["monitor"]);
+    subagent.assert_registered_lacks(&["monitor"]);
+
     let legacy_shell = probe(|turn| {
         set_features(turn, &[Feature::ShellTool, Feature::MonitorTool]);
         set_feature(turn, Feature::UnifiedExec, /*enabled*/ false);
@@ -531,101 +546,6 @@ async fn monitor_tool_requires_monitor_feature_and_unified_exec() {
     .await;
     legacy_shell.assert_visible_lacks(&["monitor"]);
     legacy_shell.assert_registered_lacks(&["monitor"]);
-}
-
-#[tokio::test]
-async fn monitor_tool_is_not_available_in_thread_spawn_side_sessions() {
-    let root_side = probe(|turn| {
-        set_features(
-            turn,
-            &[
-                Feature::ShellTool,
-                Feature::UnifiedExec,
-                Feature::MonitorTool,
-            ],
-        );
-        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
-        turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
-        turn.thread_source = Some(ThreadSource::Feature("side".to_string()));
-    })
-    .await;
-
-    root_side.assert_visible_contains(&["exec_command", "write_stdin"]);
-    root_side.assert_visible_lacks(&["monitor"]);
-    root_side.assert_registered_lacks(&["monitor"]);
-
-    let side = probe(|turn| {
-        set_features(
-            turn,
-            &[
-                Feature::ShellTool,
-                Feature::UnifiedExec,
-                Feature::MonitorTool,
-            ],
-        );
-        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
-        turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
-        turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id: ThreadId::new(),
-            depth: 1,
-            agent_path: None,
-            agent_nickname: None,
-            agent_role: None,
-        });
-        turn.thread_source = Some(ThreadSource::Feature("side".to_string()));
-    })
-    .await;
-
-    side.assert_visible_contains(&["exec_command", "write_stdin"]);
-    side.assert_visible_lacks(&["monitor"]);
-    side.assert_registered_lacks(&["monitor"]);
-}
-
-#[tokio::test]
-async fn side_sessions_do_not_get_multi_agent_tools() {
-    let side_v1 = probe(|turn| {
-        set_feature(turn, Feature::Collab, /*enabled*/ true);
-        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
-        turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id: ThreadId::new(),
-            depth: 1,
-            agent_path: None,
-            agent_nickname: None,
-            agent_role: None,
-        });
-        turn.thread_source = Some(ThreadSource::Feature("side".to_string()));
-    })
-    .await;
-    side_v1.assert_visible_lacks(&[
-        MULTI_AGENT_V1_NAMESPACE,
-        "spawn_agent",
-        "send_input",
-        "resume_agent",
-        "wait_agent",
-        "close_agent",
-    ]);
-
-    let side_v2 = probe(|turn| {
-        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
-        turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id: ThreadId::new(),
-            depth: 1,
-            agent_path: None,
-            agent_nickname: None,
-            agent_role: None,
-        });
-        turn.thread_source = Some(ThreadSource::Feature("side".to_string()));
-    })
-    .await;
-    side_v2.assert_visible_lacks(&[
-        MULTI_AGENT_V2_NAMESPACE,
-        "spawn_agent",
-        "send_message",
-        "followup_task",
-        "wait_agent",
-        "interrupt_agent",
-        "list_agents",
-    ]);
 }
 
 #[tokio::test]

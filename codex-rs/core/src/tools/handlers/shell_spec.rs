@@ -85,14 +85,16 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
         options.exec_permission_approvals_enabled,
     ));
 
-    let description = "Runs a command in a PTY, returning output or a session ID for ongoing interaction. If a command is still running when the call returns, Codex wakes you when it exits, so do not poll only to learn completion.";
-
     ToolSpec::Function(ResponsesApiTool {
         name: "exec_command".to_string(),
         description: if cfg!(windows) {
-            format!("{description}\n\n{}", windows_shell_guidance())
+            format!(
+                "Runs a command in a PTY, returning output or a session ID for ongoing interaction.\n\n{}",
+                windows_shell_guidance()
+            )
         } else {
-            description.to_string()
+            "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
+                .to_string()
         },
         strict: false,
         defer_loading: None,
@@ -136,7 +138,7 @@ pub fn create_write_stdin_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "write_stdin".to_string(),
         description:
-            "Writes characters to an existing unified exec session and returns recent output. For empty polls, prefer one long wait; do not poll repeatedly just to learn completion because exec_command wakes on exit."
+            "Writes characters to an existing unified exec session and returns recent output. For empty polls, prefer one long wait to repeated status checks."
                 .to_string(),
         strict: false,
         defer_loading: None,

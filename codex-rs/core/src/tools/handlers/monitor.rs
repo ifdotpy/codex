@@ -4,10 +4,17 @@ use crate::function_tool::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 use crate::tools::handlers::parse_arguments;
+use crate::tools::handlers::rewrite_function_string_argument;
 use crate::tools::handlers::unified_exec::ExecCommandHandler;
 use crate::tools::handlers::unified_exec::ExecCommandHandlerOptions;
+use crate::tools::handlers::unified_exec::post_unified_exec_tool_use_payload;
+use crate::tools::handlers::updated_hook_command;
+use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::CoreToolRuntime;
+use crate::tools::registry::PostToolUsePayload;
+use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
+use crate::unified_exec::MonitorConfig;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolName;
@@ -18,6 +25,8 @@ use serde_json::Value;
 
 const MONITOR_TOOL_NAME: &str = "monitor";
 const DEFAULT_MONITOR_YIELD_TIME_MS: u64 = 250;
+const DEFAULT_MONITOR_TIMEOUT_MS: u64 = 300_000;
+const MAX_MONITOR_TIMEOUT_MS: u64 = 3_600_000;
 const MAX_DESCRIPTION_CHARS: usize = 80;
 
 pub struct MonitorHandler {
@@ -61,6 +70,12 @@ struct MonitorArgs {
     /// Output token budget for the initial unified exec response.
     #[serde(default)]
     max_output_tokens: Option<usize>,
+    /// Stop the monitor after this many milliseconds. Defaults to five minutes.
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    /// Keep the monitor alive for the session instead of applying a deadline.
+    #[serde(default)]
+    persistent: bool,
 }
 
 fn create_monitor_tool(include_environment_id: bool) -> ToolSpec {
@@ -91,6 +106,19 @@ fn create_monitor_tool(include_environment_id: bool) -> ToolSpec {
                     .to_string(),
             )),
         ),
+        (
+            "timeout_ms".to_string(),
+            JsonSchema::integer(Some(format!(
+                "Monitor lifetime in milliseconds. Defaults to {DEFAULT_MONITOR_TIMEOUT_MS} and must not exceed {MAX_MONITOR_TIMEOUT_MS}."
+            ))),
+        ),
+        (
+            "persistent".to_string(),
+            JsonSchema::boolean(Some(
+                    "Keep the monitor alive for the session. Stop it with write_stdin using Ctrl-C. The output-notification safety limit still applies."
+                        .to_string(),
+                )),
+        ),
     ]);
 
     if include_environment_id {
@@ -108,7 +136,8 @@ fn create_monitor_tool(include_environment_id: bool) -> ToolSpec {
         description:
             "Start a sandboxed background command and deliver batched output as monitor notices. \
              Prefer exec_command for single-run commands and commands where completion is the only signal. \
-             Use monitor only when intermediate output should wake the session. Do not acknowledge each notice; respond only when action is needed."
+             Use monitor only when intermediate output should wake the session. Monitors default to a five-minute lifetime. \
+             Do not acknowledge each notice; respond only when action is needed."
                 .to_string(),
         strict: false,
         defer_loading: None,
@@ -173,6 +202,19 @@ fn exec_arguments_for_monitor(args: MonitorArgs) -> Result<String, FunctionCallE
     Ok(Value::Object(exec_args).to_string())
 }
 
+fn monitor_config(args: &MonitorArgs) -> Result<MonitorConfig, FunctionCallError> {
+    let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_MONITOR_TIMEOUT_MS);
+    if timeout_ms == 0 || timeout_ms > MAX_MONITOR_TIMEOUT_MS {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "monitor timeout_ms must be between 1 and {MAX_MONITOR_TIMEOUT_MS}"
+        )));
+    }
+    Ok(MonitorConfig {
+        description: validate_description(&args.description)?,
+        timeout: (!args.persistent).then(|| std::time::Duration::from_millis(timeout_ms)),
+    })
+}
+
 impl ToolExecutor<ToolInvocation> for MonitorHandler {
     fn tool_name(&self) -> ToolName {
         ToolName::plain(MONITOR_TOOL_NAME)
@@ -190,7 +232,7 @@ impl ToolExecutor<ToolInvocation> for MonitorHandler {
                 )));
             };
             let args: MonitorArgs = parse_arguments(arguments)?;
-            let description = validate_description(&args.description)?;
+            let monitor_config = monitor_config(&args)?;
             let exec_arguments = exec_arguments_for_monitor(args)?;
             let exec_invocation = ToolInvocation {
                 payload: ToolPayload::Function {
@@ -200,97 +242,60 @@ impl ToolExecutor<ToolInvocation> for MonitorHandler {
             };
 
             self.exec_handler
-                .handle_with_monitor(exec_invocation, description)
+                .handle_with_monitor(exec_invocation, monitor_config)
                 .await
         })
     }
 }
 
-impl CoreToolRuntime for MonitorHandler {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn monitor_spec_is_function_with_required_args() {
-        let ToolSpec::Function(tool) = MonitorHandler::default().spec() else {
-            panic!("expected a function tool spec");
-        };
-        assert_eq!(tool.name, MONITOR_TOOL_NAME);
-        let params = serde_json::to_value(&tool.parameters).expect("schema serializes");
-        let required = params
-            .get("required")
-            .and_then(|r| r.as_array())
-            .expect("required array present");
-        assert!(required.iter().any(|v| v == "command"));
-        assert!(required.iter().any(|v| v == "description"));
+impl CoreToolRuntime for MonitorHandler {
+    fn matches_kind(&self, payload: &ToolPayload) -> bool {
+        matches!(payload, ToolPayload::Function { .. })
     }
 
-    #[test]
-    fn monitor_rejects_empty_description() {
-        let err = validate_description("  ").expect_err("empty description rejected");
-        assert!(err.to_string().contains("must not be empty"));
-    }
-
-    #[test]
-    fn monitor_rejects_overlong_description() {
-        let description = "x".repeat(MAX_DESCRIPTION_CHARS + 1);
-        let err = validate_description(&description).expect_err("long description rejected");
-        assert!(err.to_string().contains("characters or fewer"));
-    }
-
-    #[test]
-    fn monitor_rejects_empty_command() {
-        let args = MonitorArgs {
-            command: " \t ".to_string(),
-            description: "app errors".to_string(),
-            workdir: None,
-            environment_id: None,
-            max_output_tokens: None,
+    fn pre_tool_use_payload(&self, invocation: &ToolInvocation) -> Option<PreToolUsePayload> {
+        let ToolPayload::Function { arguments } = &invocation.payload else {
+            return None;
         };
 
-        let err = exec_arguments_for_monitor(args).expect_err("empty command rejected");
-        assert!(err.to_string().contains("command must not be empty"));
+        parse_arguments::<MonitorArgs>(arguments)
+            .ok()
+            .map(|args| PreToolUsePayload {
+                tool_name: HookToolName::bash(),
+                tool_input: serde_json::json!({ "command": args.command }),
+            })
     }
 
-    #[test]
-    fn monitor_exec_arguments_use_unified_exec_shape() {
-        let args = MonitorArgs {
-            command: "tail -f app.log".to_string(),
-            description: "app errors".to_string(),
-            workdir: Some("/tmp/project".to_string()),
-            environment_id: Some("primary".to_string()),
-            max_output_tokens: Some(123),
+    fn with_updated_hook_input(
+        &self,
+        mut invocation: ToolInvocation,
+        updated_input: Value,
+    ) -> Result<ToolInvocation, FunctionCallError> {
+        let ToolPayload::Function { arguments } = invocation.payload else {
+            return Err(FunctionCallError::RespondToModel(
+                "hook input rewrite received unsupported monitor payload".to_string(),
+            ));
         };
-
-        let value: Value =
-            serde_json::from_str(&exec_arguments_for_monitor(args).expect("arguments"))
-                .expect("json");
-
-        assert_eq!(value["cmd"], "tail -f app.log");
-        assert_eq!(value["yield_time_ms"], DEFAULT_MONITOR_YIELD_TIME_MS);
-        assert_eq!(value["tty"], false);
-        assert_eq!(value["workdir"], "/tmp/project");
-        assert_eq!(value["environment_id"], "primary");
-        assert_eq!(value["max_output_tokens"], 123);
+        invocation.payload = ToolPayload::Function {
+            arguments: rewrite_function_string_argument(
+                &arguments,
+                MONITOR_TOOL_NAME,
+                "command",
+                updated_hook_command(&updated_input)?,
+            )?,
+        };
+        Ok(invocation)
     }
 
-    #[test]
-    fn monitor_exec_arguments_trim_optional_strings() {
-        let args = MonitorArgs {
-            command: "tail -f app.log".to_string(),
-            description: "app errors".to_string(),
-            workdir: Some("   ".to_string()),
-            environment_id: Some(" primary ".to_string()),
-            max_output_tokens: None,
-        };
-
-        let value: Value =
-            serde_json::from_str(&exec_arguments_for_monitor(args).expect("arguments"))
-                .expect("json");
-
-        assert!(value.get("workdir").is_none());
-        assert_eq!(value["environment_id"], "primary");
+    fn post_tool_use_payload(
+        &self,
+        invocation: &ToolInvocation,
+        result: &dyn crate::tools::context::ToolOutput,
+    ) -> Option<PostToolUsePayload> {
+        post_unified_exec_tool_use_payload(invocation, result)
     }
 }
+
+#[cfg(test)]
+#[path = "monitor_tests.rs"]
+mod tests;

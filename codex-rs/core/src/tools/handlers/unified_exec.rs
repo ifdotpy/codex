@@ -75,7 +75,7 @@ pub(crate) struct ResolvedCommand {
     pub(crate) shell_type: ShellType,
 }
 
-fn post_unified_exec_tool_use_payload(
+pub(super) fn post_unified_exec_tool_use_payload(
     invocation: &ToolInvocation,
     result: &dyn ToolOutput,
 ) -> Option<PostToolUsePayload> {

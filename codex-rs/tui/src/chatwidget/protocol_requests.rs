@@ -166,9 +166,4 @@ impl ChatWidget {
         self.add_to_history(history_cell::new_deprecation_notice(summary, details));
         self.request_redraw();
     }
-
-    pub(super) fn on_monitor_event(&mut self, description: String, output: String) {
-        self.add_to_history(history_cell::new_monitor_event(description, output));
-        self.request_redraw();
-    }
 }

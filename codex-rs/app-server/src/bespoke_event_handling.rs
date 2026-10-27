@@ -41,7 +41,6 @@ use codex_app_server_protocol::McpServerStatusUpdatedNotification;
 use codex_app_server_protocol::ModelReroutedNotification;
 use codex_app_server_protocol::ModelSafetyBufferingUpdatedNotification;
 use codex_app_server_protocol::ModelVerificationNotification;
-use codex_app_server_protocol::MonitorEventNotification;
 use codex_app_server_protocol::NetworkApprovalContext as V2NetworkApprovalContext;
 use codex_app_server_protocol::NetworkPolicyAmendment as V2NetworkPolicyAmendment;
 use codex_app_server_protocol::NetworkPolicyRuleAction as V2NetworkPolicyRuleAction;
@@ -871,15 +870,6 @@ pub(crate) async fn apply_bespoke_event_handling(
             };
             outgoing
                 .send_server_notification(ServerNotification::DeprecationNotice(notification))
-                .await;
-        }
-        EventMsg::MonitorEvent(event) => {
-            let notification = MonitorEventNotification {
-                description: event.description,
-                output: event.output,
-            };
-            outgoing
-                .send_server_notification(ServerNotification::MonitorEvent(notification))
                 .await;
         }
         EventMsg::TokenCount(token_count_event) => {

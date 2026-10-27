@@ -157,9 +157,6 @@ impl ChatWidget {
             ServerNotification::DeprecationNotice(notification) => {
                 self.on_deprecation_notice(notification.summary, notification.details)
             }
-            ServerNotification::MonitorEvent(notification) => {
-                self.on_monitor_event(notification.description, notification.output)
-            }
             ServerNotification::ConfigWarning(notification) => self.on_warning(
                 notification
                     .details

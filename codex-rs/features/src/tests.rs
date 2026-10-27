@@ -364,13 +364,6 @@ fn auth_elicitation_is_stable_and_enabled_by_default() {
 }
 
 #[test]
-fn monitor_tool_is_under_development() {
-    assert_eq!(Feature::MonitorTool.stage(), Stage::UnderDevelopment);
-    assert_eq!(Feature::MonitorTool.default_enabled(), false);
-    assert_eq!(feature_for_key("monitor_tool"), Some(Feature::MonitorTool));
-}
-
-#[test]
 fn mentions_v2_is_stable_and_enabled_by_default() {
     assert_eq!(Feature::MentionsV2.stage(), Stage::Stable);
     assert_eq!(Feature::MentionsV2.default_enabled(), true);

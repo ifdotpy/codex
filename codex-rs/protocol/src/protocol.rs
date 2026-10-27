@@ -1409,11 +1409,6 @@ pub enum EventMsg {
     /// deprecated and should be phased out.
     DeprecationNotice(DeprecationNoticeEvent),
 
-    /// Batched output emitted by a background `monitor` tool watch. Surfaced to
-    /// the user as a distinct notice, while the agent is separately woken only
-    /// when action may be needed.
-    MonitorEvent(MonitorEventEvent),
-
     /// Notification that a model stream experienced an error or disconnect
     /// and the system is handling it (e.g., retrying with backoff).
     StreamError(StreamErrorEvent),
@@ -3573,14 +3568,6 @@ pub struct DeprecationNoticeEvent {
     /// Optional extra guidance, such as migration steps or rationale.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
-pub struct MonitorEventEvent {
-    /// Short description of the monitor that produced this event.
-    pub description: String,
-    /// Batched output from the monitored command.
-    pub output: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
